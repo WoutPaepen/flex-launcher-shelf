@@ -56,7 +56,7 @@ HBO Max=hbomax.com
 ```
 
 A book without a colour takes one from its icon; power and menu commands get a cover line of their own.
-`MaxButtons` under `[Layout]` sets how many books share a page (7 by default).
+`MaxButtons` under `[Layout]` sets how many books share one stack (10 by default); a menu with more books continues on a second stack.
 
 ### Shelf settings
 

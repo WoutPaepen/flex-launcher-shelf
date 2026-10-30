@@ -135,6 +135,7 @@ YouTube=#D9D0BD;dark
 Netflix=#6E161D;light
 HBO Max=#3B23A8;light
 VRT MAX=#2A2A31;light
+Spotify=#1D6B45;light
 Browser=#0C7068;light
 System=#34383F;light
 Shutdown=#8C211C;light
@@ -153,6 +154,7 @@ YouTube=youtube.com/tv
 Netflix=netflix.com
 HBO Max=hbomax.com
 VRT MAX=vrt.be/vrtmax
+Spotify=Music and podcasts
 Browser=Firefox
 System=Power options
 
@@ -161,17 +163,15 @@ System=Power options
 # the = only has to be unique within its menu. A book's colour and cover line are optional and
 # go under [Book Colors] and [Book Notes] with the same title.
 [@DEFAULT_MENU@]
-Entry1=Kodi;@ICONS_PREFIX@kodi.png;@CMD_KODI@
-Entry2=Plex;@ICONS_PREFIX@plex.png;@CMD_PLEX@
-Entry3=Jellyfin;@ICONS_PREFIX@jellyfin.svg;@DESKTOP_PATH@/org.jellyfin.JellyfinDesktop.desktop
-Entry4=Steam;@ICONS_PREFIX@steam.png;@DESKTOP_PATH@/steam.desktop;BigPicture
-Entry5=RetroArch;@ICONS_PREFIX@retroarch.png;@DESKTOP_PATH@/com.libretro.RetroArch.desktop
-Entry6=YouTube;@ICONS_PREFIX@youtube.svg;chromium --kiosk https://www.youtube.com/tv
-Entry7=Netflix;@ICONS_PREFIX@netflix.svg;chromium --kiosk https://www.netflix.com
-Entry8=HBO Max;@ICONS_PREFIX@hbomax.svg;chromium --kiosk https://play.hbomax.com
-Entry9=VRT MAX;@ICONS_PREFIX@vrtmax.svg;chromium --kiosk https://www.vrt.be/vrtmax/
-Entry10=Browser;@ICONS_PREFIX@browser.svg;firefox --kiosk
-Entry11=System;@ICONS_PREFIX@system.png;:submenu System
+Entry1=Jellyfin;@ICONS_PREFIX@jellyfin.svg;@DESKTOP_PATH@/org.jellyfin.JellyfinDesktop.desktop
+Entry2=Steam;@ICONS_PREFIX@steam.png;@DESKTOP_PATH@/steam.desktop;BigPicture
+Entry3=YouTube;@ICONS_PREFIX@youtube.svg;chromium --kiosk https://www.youtube.com/tv
+Entry4=Netflix;@ICONS_PREFIX@netflix.svg;chromium --kiosk https://www.netflix.com
+Entry5=HBO Max;@ICONS_PREFIX@hbomax.svg;chromium --kiosk https://play.hbomax.com
+Entry6=VRT MAX;@ICONS_PREFIX@vrtmax.svg;chromium --kiosk https://www.vrt.be/vrtmax/
+Entry7=Spotify;@ICONS_PREFIX@spotify.svg;@DESKTOP_PATH@/spotify.desktop
+Entry8=Browser;@ICONS_PREFIX@browser.svg;firefox --kiosk
+Entry9=System;@ICONS_PREFIX@system.png;:submenu System
 
 [System]
 Entry1=Shutdown;@ICONS_PREFIX@system.png;:shutdown

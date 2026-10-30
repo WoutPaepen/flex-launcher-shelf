@@ -34,13 +34,13 @@ jobs:
           cd build
           run() { xvfb-run -a -s "-screen 0 1920x1080x24" ./flex-launcher -c config.ini --size 1920x1080 "$@"; }
           xvfb-run -a -s "-screen 0 1920x1080x24" glxinfo -B | grep -E "OpenGL (core profile )?version"
-          run --capture ../shots/home.png --wait 2000
-          run --keys right,right,right,right --capture ../shots/retroarch.png --wait 2000
-          run --keys right,right,right,right,right,right,right --capture ../shots/page-two.png --wait 2000
-          run --keys right,right,right,right,right,right,right,right,right,right,select --capture ../shots/system.png --wait 2000
+          # llvmpipe draws in software, so give the springs time to settle before each capture
+          run --capture ../shots/home.png --wait 5000
+          run --keys right,right,right,right,right --capture ../shots/vrt-max.png --wait 5000
+          run --keys right,right,right,right,right,right,right,right,select --capture ../shots/system.png --wait 5000
           run --keys loading --capture ../shots/loading.png --wait 600
           ls -la ../shots
-          test "$(ls ../shots/*.png | wc -l)" -eq 5
+          test "$(ls ../shots/*.png | wc -l)" -eq 4
 
       - uses: actions/upload-artifact@v4
         with:
