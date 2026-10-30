@@ -1,19 +1,6 @@
-name: Build
+name: Build (upstream packages)
+# Upstream's Windows, Debian and Raspberry Pi packaging; run by hand. The Shelf workflow builds every push.
 on:
-  push:
-    paths-ignore:
-      [
-        "**/**.md"
-      ]
-
-  pull_request:
-    branches:
-      - master
-    paths-ignore:
-      [
-        "**/**.md"
-      ]
-
   workflow_dispatch:
 
 defaults:

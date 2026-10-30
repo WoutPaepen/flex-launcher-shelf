@@ -1,0 +1,48 @@
+name: Shelf
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux build and screenshots
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libsdl2-dev libsdl2-image-dev \
+            libsdl2-ttf-dev libinih-dev xvfb mesa-utils libgl1-mesa-dri
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DEXTRA_WARNINGS=OFF
+          cmake --build build -j"$(nproc)"
+
+      - name: Run on Mesa (llvmpipe) and capture the shelf
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SDL_VIDEODRIVER: x11
+        run: |
+          mkdir -p shots
+          cd build
+          run() { xvfb-run -a -s "-screen 0 1920x1080x24" ./flex-launcher -c config.ini --size 1920x1080 "$@"; }
+          xvfb-run -a -s "-screen 0 1920x1080x24" glxinfo -B | grep -E "OpenGL (core profile )?version"
+          run --capture ../shots/home.png --wait 2000
+          run --keys right,right,right,right --capture ../shots/retroarch.png --wait 2000
+          run --keys right,right,right,right,right,right,right --capture ../shots/page-two.png --wait 2000
+          run --keys right,right,right,right,right,right,right,right,right,right,select --capture ../shots/system.png --wait 2000
+          run --keys loading --capture ../shots/loading.png --wait 600
+          ls -la ../shots
+          test "$(ls ../shots/*.png | wc -l)" -eq 5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shelf-screenshots
+          path: shots/

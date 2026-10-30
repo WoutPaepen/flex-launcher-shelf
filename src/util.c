@@ -24,14 +24,33 @@ extern Hotkey          *hotkeys;
 Menu                   *menu  = NULL;
 Entry                  *entry = NULL;
 
-static const char *mode_settings[][5] = {
-    {"Color", "Image", "Slideshow", "Transparent", NULL}, // Background Mode
-    {"Blank", "None", "Quit", NULL, NULL},                // OnLaunch
-    {"Truncated", "Shrink", "None", NULL, NULL},          // OversizeMode
-    {"Left", "Right", NULL, NULL, NULL},                  // Clock Alignment
-    {"24hr", "12hr", "Auto", NULL, NULL},                 // Clock Format
-    {"Big", "Little", "Auto", NULL, NULL}                 // Date Format
+static const char *mode_settings[][7] = {
+    {"Color", "Image", "Slideshow", "Transparent", "Wall", "Room", NULL}, // Background Mode
+    {"Blank", "None", "Quit", NULL, NULL, NULL, NULL},                    // OnLaunch
+    {"Truncated", "Shrink", "None", NULL, NULL, NULL, NULL},              // OversizeMode
+    {"Left", "Right", NULL, NULL, NULL, NULL, NULL},                      // Clock Alignment
+    {"24hr", "12hr", "Auto", NULL, NULL, NULL, NULL},                     // Clock Format
+    {"Big", "Little", "Auto", NULL, NULL, NULL, NULL},                    // Date Format
+    {"Auto", "High", "Low", NULL, NULL, NULL, NULL}                       // Shelf Quality
 };
+
+// A function to find or create the styling record for a book title
+static BookStyle *book_style(const char *title)
+{
+    BookStyle *last = NULL;
+    for (BookStyle *i = config.book_styles; i != NULL; i = i->next) {
+        if (MATCH(i->title, title))
+            return i;
+        last = i;
+    }
+    BookStyle *style = calloc(1, sizeof(BookStyle));
+    style->title = strdup(title);
+    if (last == NULL)
+        config.book_styles = style;
+    else
+        last->next = style;
+    return style;
+}
 
 // A function to handle the arguments from the command line
 void handle_arguments(int argc, char *argv[], char **config_file_path)
@@ -47,6 +66,10 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
             { "version",      no_argument,       NULL, 'v' },
             { "config",       required_argument, NULL, 'c' },
             { "debug",        no_argument,       NULL, 'd' },
+            { "capture",      required_argument, NULL, 1000 },
+            { "keys",         required_argument, NULL, 1001 },
+            { "wait",         required_argument, NULL, 1002 },
+            { "size",         required_argument, NULL, 1003 },
             { 0, 0, 0, 0 }
         };
     
@@ -69,6 +92,24 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
 
                 case 'd':
                     config.debug = true;
+                    break;
+
+                // Test hooks: play a key sequence, save the screen to a PNG and quit
+                case 1000:
+                    config.capture_path = strdup(optarg);
+                    break;
+
+                case 1001:
+                    config.test_keys = strdup(optarg);
+                    break;
+
+                case 1002:
+                    config.capture_wait = atoi(optarg);
+                    break;
+
+                case 1003:
+                    if (sscanf(optarg, "%ix%i", &config.window_width, &config.window_height) != 2)
+                        config.window_width = config.window_height = 0;
                     break;
             }
         }
@@ -389,6 +430,35 @@ int config_handler(void *user, const char *section, const char *name, const char
         // Parse gamepad controls
         else
             add_gamepad_control(name, value);
+    }
+
+    else if (MATCH(section, "Shelf")) {
+        if (MATCH(name, SETTING_SHELF_ASSETS)) {
+            config.assets_dir = strdup(value);
+            clean_path(config.assets_dir);
+        }
+        else if (MATCH(name, SETTING_SHELF_ROOM)) {
+            config.room_hdr = strdup(value);
+            clean_path(config.room_hdr);
+        }
+        else if (MATCH(name, SETTING_SHELF_QUALITY))
+            parse_mode_setting(MODE_SETTING_QUALITY, value, (int*) &config.quality);
+        else if (MATCH(name, SETTING_SHELF_SPINE_TITLES))
+            convert_bool(value, &config.spine_titles);
+    }
+
+    // Cloth colour per title: Kodi=#2A50C4 or Kodi=#E6D5A8;dark
+    else if (MATCH(section, "Book Colors")) {
+        BookStyle *style = book_style(name);
+        free(style->color);
+        style->color = strdup(value);
+    }
+
+    // The line printed under the title on the cover
+    else if (MATCH(section, "Book Notes")) {
+        BookStyle *style = book_style(name);
+        free(style->note);
+        style->note = strdup(value);
     }
 
     // Parse menus/entries
@@ -883,17 +953,11 @@ void convert_percent_to_int(char *string, int *result, int max_value)
 // A function to make sure all settings are in their correct range
 void validate_settings(Geometry *geo)
 {
-    // Reduce number of buttons if they can't all fit on screen
-    if (config.icon_size * config.max_buttons > (unsigned int) geo->screen_width) {
-        unsigned int i;
-        for (i = config.max_buttons; i * config.icon_size > (unsigned int) geo->screen_width && i > 0; i--);
-        log_error(
-            "Not enough screen space for %i buttons, reducing to %i", 
-            config.max_buttons, 
-            i
-        );
-        config.max_buttons = i; 
-    }
+    // Books per page on the shelf
+    if (config.max_buttons < 2)
+        config.max_buttons = 2;
+    else if (config.max_buttons > 12)
+        config.max_buttons = 12;
 
     if (!config.titles_enabled)
         config.title_padding = 0;

@@ -81,9 +81,17 @@
 @SETTING_SCREENSAVER_INTENSITY@=@DEFAULT_SCREENSAVER_INTENSITY@
 @SETTING_SCREENSAVER_PAUSE_SLIDESHOW@=@DEFAULT_SCREENSAVER_PAUSE_SLIDESHOW@
 
+[Shelf]
+# Where the shelf's fonts, textures and room photograph live; found next to the executable by default
+#@SETTING_SHELF_ASSETS@=
+# Auto lowers the scene resolution when frames run slow; High renders 4K natively; Low is for weak GPUs
+@SETTING_SHELF_QUALITY@=Auto
+@SETTING_SHELF_SPINE_TITLES@=true
+# An equirectangular .hdr shown in Mode=Room
+#@SETTING_SHELF_ROOM@=
+
 [Hotkeys]
-# Esc to quit
-Hotkey1=#1B;:quit
+# Esc, Backspace and Browser Back go back a menu; Home goes to the first menu
 
 [Gamepad]
 @SETTING_GAMEPAD_ENABLED@=@DEFAULT_GAMEPAD_ENABLED@
@@ -104,7 +112,7 @@ Hotkey1=#1B;:quit
 #@SETTING_GAMEPAD_BUTTON_X@=
 #@SETTING_GAMEPAD_BUTTON_Y@=
 #@SETTING_GAMEPAD_BUTTON_BACK@=
-#@SETTING_GAMEPAD_BUTTON_GUIDE@=
+@SETTING_GAMEPAD_BUTTON_GUIDE@=:home
 #@SETTING_GAMEPAD_BUTTON_START@=
 #@SETTING_GAMEPAD_BUTTON_LEFT_STICK@=
 #@SETTING_GAMEPAD_BUTTON_RIGHT_STICK@=
@@ -115,14 +123,58 @@ Hotkey1=#1B;:quit
 @SETTING_GAMEPAD_BUTTON_DPAD_LEFT@=:left
 @SETTING_GAMEPAD_BUTTON_DPAD_RIGHT@=:right
 
+# Cloth colour per title, optionally with ;dark or ;light for the ink on the cover.
+# Titles without a colour take one from their icon.
+[Book Colors]
+Kodi=#2A50C4;light
+Plex=#D6951C;dark
+Jellyfin=#5D38B8;light
+Steam=#1B3554;light
+RetroArch=#B83A24;light
+YouTube=#D9D0BD;dark
+Netflix=#6E161D;light
+HBO Max=#3B23A8;light
+VRT MAX=#2A2A31;light
+Browser=#0C7068;light
+System=#34383F;light
+Shutdown=#8C211C;light
+Restart=#1D5E3F;light
+Sleep=#283479;light
+Exit=#4B4236;light
+
+# The line printed under the title on the cover
+[Book Notes]
+Kodi=Kodi media centre
+Plex=Plex HTPC
+Jellyfin=Media player
+Steam=Big Picture
+RetroArch=Emulators
+YouTube=youtube.com/tv
+Netflix=netflix.com
+HBO Max=hbomax.com
+VRT MAX=vrt.be/vrtmax
+Browser=Firefox
+System=Power options
+
 # Menu configurations
+# One line per book: Title;icon;command. Add, remove or reorder lines freely; the name before
+# the = only has to be unique within its menu. A book's colour and cover line are optional and
+# go under [Book Colors] and [Book Notes] with the same title.
 [@DEFAULT_MENU@]
 Entry1=Kodi;@ICONS_PREFIX@kodi.png;@CMD_KODI@
 Entry2=Plex;@ICONS_PREFIX@plex.png;@CMD_PLEX@
-Entry3=@TITLE_GAMES@;@ICONS_PREFIX@@ICON_GAMES@;@CMD_GAMES@
-Entry4=System;@ICONS_PREFIX@system.png;:submenu System
+Entry3=Jellyfin;@ICONS_PREFIX@jellyfin.svg;@DESKTOP_PATH@/org.jellyfin.JellyfinDesktop.desktop
+Entry4=Steam;@ICONS_PREFIX@steam.png;@DESKTOP_PATH@/steam.desktop;BigPicture
+Entry5=RetroArch;@ICONS_PREFIX@retroarch.png;@DESKTOP_PATH@/com.libretro.RetroArch.desktop
+Entry6=YouTube;@ICONS_PREFIX@youtube.svg;chromium --kiosk https://www.youtube.com/tv
+Entry7=Netflix;@ICONS_PREFIX@netflix.svg;chromium --kiosk https://www.netflix.com
+Entry8=HBO Max;@ICONS_PREFIX@hbomax.svg;chromium --kiosk https://play.hbomax.com
+Entry9=VRT MAX;@ICONS_PREFIX@vrtmax.svg;chromium --kiosk https://www.vrt.be/vrtmax/
+Entry10=Browser;@ICONS_PREFIX@browser.svg;firefox --kiosk
+Entry11=System;@ICONS_PREFIX@system.png;:submenu System
 
 [System]
 Entry1=Shutdown;@ICONS_PREFIX@system.png;:shutdown
 Entry2=Restart;@ICONS_PREFIX@restart.png;:restart
 Entry3=Sleep;@ICONS_PREFIX@sleep.png;:sleep
+Entry4=Exit;@ICONS_PREFIX@exit.svg;:quit

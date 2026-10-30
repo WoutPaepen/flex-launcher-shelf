@@ -125,12 +125,11 @@ void make_window_transparent()
     );
 }
 
-// When the window is transparent, we need to hide the cursor behind the non-transparent icon
+// When the window is transparent, park the cursor over the middle of the shelf
 void hide_cursor(Entry *entry)
 {
-    SetCursorPos(entry->icon_rect.x + entry->icon_rect.w / 2,
-        entry->icon_rect.y + entry->icon_rect.h / 2
-    );
+    (void) entry;
+    SetCursorPos(GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2);
 }
 
 // A function to launch an application

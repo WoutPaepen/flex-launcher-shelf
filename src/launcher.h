@@ -1,3 +1,5 @@
+#include <stdbool.h>
+#include <SDL.h>
 // Color masking bit logic
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
 #define RMASK 0xff000000
@@ -59,15 +61,24 @@ typedef enum {
     MODE_SETTING_OVERSIZE,
     MODE_SETTING_ALIGNMENT,
     MODE_SETTING_TIME_FORMAT,
-    MODE_SETTING_DATE_FORMAT
+    MODE_SETTING_DATE_FORMAT,
+    MODE_SETTING_QUALITY
 } ModeSettingType;
 
 typedef enum {
     BACKGROUND_COLOR,
     BACKGROUND_IMAGE,
     BACKGROUND_SLIDESHOW,
-    BACKGROUND_TRANSPARENT
+    BACKGROUND_TRANSPARENT,
+    BACKGROUND_WALL,      // graphite plaster wall washed in the colour of the chosen book
+    BACKGROUND_ROOM       // the photographed room behind the shelf, out of focus
 } ModeBackground;
+
+typedef enum {
+    QUALITY_AUTO,
+    QUALITY_HIGH,
+    QUALITY_LOW
+} ModeQuality;
 
 typedef enum {
     ON_LAUNCH_BLANK,
@@ -122,6 +133,8 @@ typedef struct {
     bool screensaver_transition;
     bool clock_rendering;
     bool clock_ready;
+    bool busy;              // a launch or power command owns the screen
+    bool wait_key;          // the next key press only dismisses the blank screen
 } State;
 
 // Timing information
@@ -141,11 +154,6 @@ typedef struct entry {
     char           *icon_path;
     char           *icon_selected_path;
     char           *cmd;
-    SDL_Texture    *icon;
-    SDL_Texture    *icon_selected;
-    SDL_Rect       icon_rect;
-    SDL_Texture    *title_texture;
-    SDL_Rect       text_rect;
     int            title_offset;
     struct entry   *next;
     struct entry   *previous;
@@ -161,6 +169,8 @@ typedef struct menu {
     Entry        *first_entry;
     Entry        *root_entry;
     Entry        *last_selected_entry;
+    int          shelf_index; // row on the shelf, -1 if the menu has no entries
+    int          focus;       // index of the chosen book
     struct menu  *next;
     struct menu  *back;
 } Menu;
@@ -202,18 +212,13 @@ typedef struct {
     int num_buttons; // Number of buttons shown on the screen
 } Geometry;
 
-// Struct for highlight 
-typedef struct {
-    SDL_Texture *texture;
-    SDL_Rect rect;
-} Highlight;
-
-//Struct for scroll indicators
-typedef struct {
-    SDL_Texture *texture;
-    SDL_Rect rect_right;
-    SDL_Rect rect_left;
-} Scroll;
+// Per-title book styling from the [Book Colors] and [Book Notes] sections
+typedef struct book_style {
+    char *title;
+    char *color;  // #RRGGBB, optionally followed by ;dark or ;light ink
+    char *note;   // printed under the title on the cover
+    struct book_style *next;
+} BookStyle;
 
 // Slideshow
 typedef struct {
@@ -224,16 +229,7 @@ typedef struct {
     float transition_alpha;
     float transition_change_rate;
     SDL_Surface *transition_surface;
-    SDL_Texture *transition_texture;
 } Slideshow;
-
-// Screensaver
-typedef struct {
-    float alpha;
-    float alpha_end_value;
-    float transition_change_rate;
-    SDL_Texture *texture;
-} Screensaver;
 
 // Configuration settings
 typedef struct {
@@ -311,9 +307,18 @@ typedef struct {
     bool clock_include_weekday;
     Uint32 slideshow_image_duration;
     Uint32 slideshow_transition_time;
+    char *assets_dir;      // fonts, textures and the room photograph
+    char *room_hdr;
+    ModeQuality quality;
+    bool spine_titles;
+    BookStyle *book_styles;
+    char *capture_path;    // test hooks: render, save a PNG and quit
+    char *test_keys;
+    int capture_wait;
+    int window_width;
+    int window_height;
 } Config;
 
 void quit_slideshow(void);
-void set_draw_color(void);
 void quit(int status);
 void print_version(FILE *stream);

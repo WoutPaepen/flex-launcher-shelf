@@ -1,0 +1,20 @@
+# Development environment for building Flex Launcher without system packages.
+# Usage: pixi run build && pixi run launch
+[workspace]
+name = "flex-launcher"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+
+[dependencies]
+cmake = ">=3.18"
+ninja = "*"
+pkg-config = "*"
+c-compiler = "*"
+sdl2 = ">=2.0.14"
+sdl2_image = ">=2.0.5"
+sdl2_ttf = ">=2.0.15"
+
+[tasks]
+configure = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX"
+build = { cmd = "cmake --build build", depends-on = ["configure"] }
+launch = { cmd = "./build/flex-launcher -c build/config.ini", depends-on = ["build"] }

@@ -45,7 +45,10 @@ if (UNIX)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2>=${MIN_SDL_VERSION})
   pkg_check_modules(SDL2_IMAGE REQUIRED IMPORTED_TARGET SDL2_image>=${MIN_SDL_IMAGE_VERSION})
   pkg_check_modules(SDL2_TTF REQUIRED IMPORTED_TARGET SDL2_ttf>=${MIN_SDL_TTF_VERSION})
-  pkg_check_modules(INIH REQUIRED IMPORTED_TARGET inih)
+  pkg_check_modules(INIH IMPORTED_TARGET inih)
+  if (NOT INIH_FOUND)
+    message(STATUS "inih not found with pkg-config, using the bundled copy")
+  endif ()
 endif ()
 
 # Find dependencies - Windows
@@ -63,9 +66,18 @@ endif ()
 # Build configuration - Linux
 if (UNIX)
   if (NOT CMAKE_BUILD_TYPE MATCHES "Debug")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -s")
+    if (APPLE)
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
+    else ()
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -s")
+    endif ()
   endif ()
-  set(CMAKE_SHARED_LINKER_FLAGS "--as-needed")
+  if (APPLE)
+    # macOS is only a development host: build the Linux code paths
+    add_compile_definitions(__unix__=1 GL_SILENCE_DEPRECATION)
+  else ()
+    set(CMAKE_SHARED_LINKER_FLAGS "--as-needed")
+  endif ()
 endif ()
 
 # Build configuration - Windows

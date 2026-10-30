@@ -10,7 +10,28 @@ set(SOURCES
   debug.h
   clock.c
   clock.h
+  gl.c
+  gl.h
+  vmath.h
+  spring.h
+  raster.c
+  raster.h
+  hdr.c
+  hdr.h
+  text.c
+  text.h
+  bookart.c
+  bookart.h
+  render.c
+  render.h
+  shelf.c
+  shelf.h
+  overlay.c
+  overlay.h
 )
+if (UNIX AND NOT INIH_FOUND)
+  list(APPEND SOURCES external/inih/ini.c)
+endif ()
 if (UNIX)
   add_executable(${EXECUTABLE_TITLE} ${SOURCES})
 endif ()
@@ -27,7 +48,12 @@ add_subdirectory("platform")
 # Link libraries together 
 target_link_libraries(${EXECUTABLE_TITLE} platform)
 if (UNIX)
-  target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::SDL2 PkgConfig::SDL2_IMAGE PkgConfig::SDL2_TTF PkgConfig::INIH m)
+  target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::SDL2 PkgConfig::SDL2_IMAGE PkgConfig::SDL2_TTF m)
+  if (INIH_FOUND)
+    target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::INIH)
+  else ()
+    target_include_directories(${EXECUTABLE_TITLE} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/inih")
+  endif ()
 else ()
   target_link_libraries(${EXECUTABLE_TITLE} 
   $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>

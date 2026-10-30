@@ -1,4 +1,84 @@
 <div align="center">
+
+# Flex Launcher: The Shelf
+
+<img src="docs/shelf/home.png" alt="The shelf: books on an oak sideboard against a graphite wall" width="900">
+</div>
+
+This fork replaces Flex Launcher's flat icon row with a lit bookshelf. Every menu entry is a cloth-bound
+book with its icon on a paper label and its title in foil; the chosen book turns face-out under a picture
+lamp, its colour washes the wall behind the shelf, and opening it swings the cover back and carries the
+camera into the first page while the application starts. Everything else is upstream Flex Launcher:
+`config.ini`, menus and submenus, hotkeys, gamepads, `.desktop` files, the screensaver, the clock and the
+power commands.
+
+It is a native C renderer on OpenGL 3.3 (or OpenGL ES 3.0) inside SDL2, written for a Linux HTPC on a
+1080p or 4K TV, including older and low-power GPUs: the scene draws at no more than 1080p, drops its
+resolution on its own when frames run slow, and stops rendering entirely while nothing moves.
+
+| Submenu | Opening a book | Loading |
+| --- | --- | --- |
+| <img src="docs/shelf/system.png" width="300"> | <img src="docs/shelf/opening.png" width="300"> | <img src="docs/shelf/loading.png" width="300"> |
+
+### Build on Linux
+
+```bash
+sudo apt install build-essential cmake pkg-config libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libinih-dev
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/flex-launcher -c build/config.ini
+```
+
+`libinih-dev` is optional; a copy of inih is bundled. There is no OpenGL library to link: the functions are
+loaded through SDL at start-up, so the same binary runs on Mesa, NVIDIA and AMD drivers, and on GLES-only
+boards. `sudo cmake --install build` installs the launcher, `config.ini` and the shelf assets.
+Without root, [pixi](https://pixi.sh) builds it from conda-forge: `pixi run launch`.
+
+### Adding and removing books
+
+A book is one line in a menu section of `config.ini`:
+
+```ini
+[Home]
+Entry1=Kodi;/usr/share/flex-launcher/assets/icons/kodi.png;/usr/share/applications/kodi.desktop
+Entry8=HBO Max;/usr/share/flex-launcher/assets/icons/hbomax.svg;chromium --kiosk https://play.hbomax.com
+```
+
+Add, delete or reorder lines; the name before `=` only has to be unique within its menu. Its cloth colour
+and cover line are optional and keyed by title:
+
+```ini
+[Book Colors]
+HBO Max=#3B23A8;light   # ;light for gold foil, ;dark for black ink, or leave it out
+
+[Book Notes]
+HBO Max=hbomax.com
+```
+
+A book without a colour takes one from its icon; power and menu commands get a cover line of their own.
+`MaxButtons` under `[Layout]` sets how many books share a page (7 by default).
+
+### Shelf settings
+
+| Section | Setting | |
+| --- | --- | --- |
+| `[Background]` | `Mode` | `Wall` (default: graphite wall washed in the chosen book's colour), `Color` (the wall in `Color`), `Room` (the photographed room behind the shelf), `Image`, `Slideshow`, `Transparent` |
+| `[Shelf]` | `Quality` | `Auto` (default) lowers the scene resolution when frames run slow, `High` renders 4K natively, `Low` for weak GPUs |
+| `[Shelf]` | `SpineTitles` | titles on the spines, `true` by default |
+| `[Shelf]` | `Assets` | where `fonts/`, `textures/` and `env/` live; found next to the executable or in the install prefix by default |
+| `[Shelf]` | `Room` | an equirectangular `.hdr` for `Mode=Room` |
+
+Keys: arrows move, Enter or Space opens, Backspace, Esc or Browser Back goes back, Home goes to the first
+menu. A gamepad's D-pad or left stick moves, A opens, B goes back, Guide goes home.
+
+For testing without a TV: `--size 1920x1080` opens a window, `--keys right,right,select` plays a key
+sequence and `--capture shot.png --wait 1500` saves the screen afterwards and quits.
+
+Asset licences are listed in [`assets/LICENSES.md`](assets/LICENSES.md).
+
+---
+
+<div align="center">
   <a>
     <img src="docs/flex-launcher.svg" alt="Logo" width="150" height="150">
   </a>

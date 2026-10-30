@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 #include <time.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -14,27 +15,42 @@
 #include "util.h"
 #include "debug.h"
 #include "clock.h"
+#include "gl.h"
+#include "render.h"
+#include "shelf.h"
+#include "overlay.h"
+#include "bookart.h"
+#include "text.h"
+#include "spring.h"
 #include "platform/platform.h"
+#ifdef __unix__
+#include "platform/unix.h"
+#else
+#define CMD_SHUTDOWN "shutdown /s /t 0"
+#define CMD_RESTART "shutdown /r /t 0"
+#endif
+
+#define EJECT_TIME 420       // the book slides out before the application starts
+#define BLANK_TIME 420
+#define POWER_TIMEOUT 15000  // still running this long after a shutdown means it did not happen
+#define REPEAT_DELAY 500
+#define REPEAT_INTERVAL 130
+#define QUALITY_FRAMES 40
 
 static void init_sdl(void);
 static void init_sdl_image(void);
 static void create_window(void);
 static void init_sdl_ttf(void);
-static int load_menu(Menu *menu, bool set_back_menu, bool reset_position);
-static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool reset_position);
-static void update_slideshow(void);
-static void resume_slideshow(void);
-static void update_screensaver(void);
-static void update_clock(bool block);
 static void init_slideshow(void);
-static void init_screensaver(void);
-static void calculate_button_geometry(Entry *entry, int buttons);
-static void render_buttons(Menu *menu);
-static void move_left(void);
-static void move_right(void);
-static void load_submenu(const char *submenu);
-static void load_back_menu(Menu *menu);
-static void draw_screen(void);
+static void build_shelf(void);
+static void update_slideshow(void);
+static void update_screensaver(void);
+static void update_launch(void);
+static void move(int direction);
+static void select_entry(void);
+static void open_menu(const char *name);
+static void go_back(void);
+static void go_home(void);
 static void handle_keypress(SDL_Keysym *key);
 static void execute_command(const char *command);
 static void poll_gamepad(void);
@@ -64,7 +80,7 @@ Config config = {
     .title_shadow_color.g             = DEFAULT_TITLE_SHADOW_COLOR_G,
     .title_shadow_color.b             = DEFAULT_TITLE_SHADOW_COLOR_B,
     .title_shadow_color.a             = DEFAULT_TITLE_SHADOW_COLOR_A,
-    .background_mode                  = BACKGROUND_COLOR,
+    .background_mode                  = BACKGROUND_WALL,
     .background_color.r               = DEFAULT_BACKGROUND_COLOR_R,
     .background_color.g               = DEFAULT_BACKGROUND_COLOR_G,
     .background_color.b               = DEFAULT_BACKGROUND_COLOR_B,
@@ -152,52 +168,83 @@ Config config = {
     .clock_date_format                = DEFAULT_CLOCK_DATE_FORMAT,
     .clock_include_weekday            = DEFAULT_CLOCK_INCLUDE_WEEKDAY,
     .slideshow_image_duration         = DEFAULT_SLIDESHOW_IMAGE_DURATION,
-    .slideshow_transition_time        = DEFAULT_SLIDESHOW_TRANSITION_TIME
+    .slideshow_transition_time        = DEFAULT_SLIDESHOW_TRANSITION_TIME,
+    .assets_dir                       = NULL,
+    .room_hdr                         = NULL,
+    .quality                          = QUALITY_AUTO,
+    .spine_titles                     = true,
+    .book_styles                      = NULL,
+    .capture_path                     = NULL,
+    .test_keys                        = NULL,
+    .capture_wait                     = 1500,
+    .window_width                     = 0,
+    .window_height                    = 0
 };
 
 // Initialize default states
 State state = { false };
 
+typedef enum {
+    LAUNCH_IDLE,
+    LAUNCH_EJECT,     // the book is sliding out
+    LAUNCH_WAITING,   // the process started, waiting for its window
+    LAUNCH_POWER,     // a power command is about to run
+    LAUNCH_POWER_SENT,
+    LAUNCH_CLOSING    // :quit, fading to black first
+} LaunchPhase;
+
 // Global variables
 SDL_Window *window                    = NULL;
-SDL_Renderer *renderer                = NULL;
-SDL_Texture *background_texture       = NULL;
-SDL_Texture *background_overlay       = NULL;
+SDL_GLContext gl_context              = NULL;
 Menu *default_menu                    = NULL;
 Menu *current_menu                    = NULL;
 Entry *current_entry                  = NULL;
-Highlight *highlight                  = NULL;
-Scroll *scroll                        = NULL;
 Slideshow *slideshow                  = NULL;
-Screensaver *screensaver              = NULL;
 FILE *log_file                        = NULL;
 Gamepad *gamepads                     = NULL;
 GamepadControl *gamepad_controls      = NULL;
 Hotkey *hotkeys                       = NULL;
-Clock *clk                            = NULL;
-TTF_Font *clock_font                  = NULL;
-SDL_Thread *Slideshowhread            = NULL;
-SDL_Thread *clock_thread              = NULL;
+SDL_Thread *slideshow_thread          = NULL;
 SDL_Event event;
 SDL_SysWMinfo wm_info;
 SDL_DisplayMode display_mode;
-TextInfo title_info;
 Ticks ticks;
 Geometry geo;
 Uint32 refresh_period;
-Uint32 delay_period;
-Uint32 repeat_period;
 
+static struct {
+    LaunchPhase phase;
+    Uint32 t0;
+    Entry *entry;
+    char cmd[2048];
+    char power[16];
+    bool page_pending;    // print "Starting" on the open book once it fills the screen
+    bool quit_after;      // OnLaunch=Quit: close once the page is up
+} launch;
+
+static int win_w, win_h;
+static bool gles = false;
+static bool dimmed = false;
+static bool animating = true;
+static Uint32 last_frame = 0;
+static float base_scale = 1.f;
+static float quality_scale = 1.f;
+static float frame_times[QUALITY_FRAMES];
+static int frame_count = 0;
+static Uint32 last_drop = 0;
+static ClockText clock_text;
+static Uint32 photo_fade_start = 0;
+static bool photo_fading = false;
+static char assets_dir[MAX_PATH_CHARS + 1];
 
 // A function to initialize SDL
 static void init_sdl()
-{    
+{
     // Set flags, hints
     Uint32 sdl_flags = SDL_INIT_VIDEO;
 #ifdef __unix__
     SDL_SetHint(SDL_HINT_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR, "0");
 #endif
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, config.inhibit_os_screensaver ? "0" : "1");
     if (config.gamepad_enabled)
         sdl_flags |= SDL_INIT_GAMECONTROLLER;
@@ -209,26 +256,54 @@ static void init_sdl()
     SDL_GetDesktopDisplayMode(0, &display_mode);
     geo.screen_width = display_mode.w;
     geo.screen_height = display_mode.h;
-    refresh_period = 1000 / (Uint32) display_mode.refresh_rate;
+    refresh_period = 1000 / (Uint32) (display_mode.refresh_rate > 0 ? display_mode.refresh_rate : 60);
     geo.screen_margin = (int) (SCREEN_MARGIN * (float) geo.screen_height);
 }
 
-// A function to create the window and renderer
+// Try a desktop OpenGL 3.3 core context first, then OpenGL ES 3.0 for ARM boards
+static bool create_context(bool es)
+{
+    SDL_GL_ResetAttributes();
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, es ? SDL_GL_CONTEXT_PROFILE_ES : SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, es ? 0 : 3);
+#ifdef __APPLE__
+    if (!es)
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+#endif
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+    Uint32 flags = SDL_WINDOW_OPENGL;
+    if (config.window_width > 0 && config.window_height > 0)
+        window = SDL_CreateWindow(PROJECT_NAME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                     config.window_width, config.window_height, flags);
+    else
+        window = SDL_CreateWindow(PROJECT_NAME, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                     0, 0, flags | SDL_WINDOW_FULLSCREEN_DESKTOP);
+    if (window == NULL)
+        return false;
+    gl_context = SDL_GL_CreateContext(window);
+    if (gl_context == NULL) {
+        SDL_DestroyWindow(window);
+        window = NULL;
+        return false;
+    }
+    gles = es;
+    return true;
+}
+
+// A function to create the window and the OpenGL context
 static void create_window()
 {
-    window = SDL_CreateWindow(PROJECT_NAME,
-                 SDL_WINDOWPOS_UNDEFINED,
-                 SDL_WINDOWPOS_UNDEFINED,
-                 0,
-                 0,
-                 SDL_WINDOW_FULLSCREEN_DESKTOP
-             );
-    if (window == NULL)
-        log_fatal("Could not create SDL Window\n%s", SDL_GetError());
+    if (!create_context(false) && !create_context(true))
+        log_fatal("Could not create an OpenGL 3.3 or OpenGL ES 3.0 context\n%s", SDL_GetError());
     SDL_ShowCursor(SDL_DISABLE);
 
-    // Create HW accelerated renderer, get screen resolution for geometry calculations
-    Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
+    const char *missing = NULL;
+    if (!gl_load(&missing))
+        log_fatal("The graphics driver is missing %s", missing ? missing : "an OpenGL function");
+
     if (!config.vsync) {
         if (config.fps_limit > MIN_FPS_LIMIT && config.fps_limit <= display_mode.refresh_rate)
             refresh_period = 1000 / (Uint32) config.fps_limit;
@@ -236,25 +311,13 @@ static void create_window()
             config.vsync = true;
     }
     if (config.vsync) {
-        refresh_period = 1000 / (Uint32) display_mode.refresh_rate;
-        renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
+        // adaptive vsync when the driver has it, so a missed frame does not halve the rate
+        if (SDL_GL_SetSwapInterval(-1) < 0)
+            SDL_GL_SetSwapInterval(1);
     }
-    if (config.gamepad_enabled) {
-        delay_period = GAMEPAD_REPEAT_DELAY / refresh_period;
-        repeat_period = GAMEPAD_REPEAT_INTERVAL / refresh_period;
-        if (!repeat_period)
-            repeat_period = 1;
-    }
-    if (slideshow != NULL)
-        slideshow->transition_change_rate = 255.0f / ((float) config.slideshow_transition_time / (float) refresh_period);
-
-    renderer = SDL_CreateRenderer(window, -1, renderer_flags);
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    if (renderer == NULL)
-        log_fatal("Could not initialize renderer\n%s", SDL_GetError());
-
-    // Set background color
-    set_draw_color();
+    else
+        SDL_GL_SetSwapInterval(0);
+    SDL_GL_GetDrawableSize(window, &win_w, &win_h);
 
 #ifdef _WIN32
     SDL_VERSION(&wm_info.version);
@@ -272,64 +335,50 @@ static void init_sdl_image()
         log_fatal("Could not initialize SDL_image\n%s", IMG_GetError());
 }
 
-// A function to set the color of the renderer
-void set_draw_color()
-{
-    SDL_Color *color = NULL;
-    if (config.background_mode == BACKGROUND_COLOR)
-        color = &config.background_color;
-    else if (config.background_mode == BACKGROUND_TRANSPARENT)
-        color = &config.chroma_key_color;
-
-    if (color == NULL)
-        SDL_SetRenderDrawColor(renderer, 0xFF, 0xFF, 0xFF, 0xFF);
-    else
-        SDL_SetRenderDrawColor(renderer,
-            color->r,
-            color->g,
-            color->b,
-            color->a
-        );
-}
-
 // A function to initialize SDL's TTF subsystem
 static void init_sdl_ttf()
 {
     if (TTF_Init() == -1)
         log_fatal("Could not initialize SDL_ttf\n%s", TTF_GetError());
-    
-    title_info = (TextInfo) { 
-        .font_size = (int) config.title_font_size,
-        .shadow = config.title_shadows,
-        .font_path = &config.title_font_path,
-        .max_width = config.icon_size,
-        .oversize_mode = config.title_oversize_mode,
-        .color = &config.title_font_color
-    };
-    if (config.title_shadows) {
-        title_info.shadow_color = &config.title_shadow_color;
-        calculate_shadow_alpha(title_info);
-    }
-    else
-        title_info.shadow_color = NULL;
+}
 
-    int error = load_font(&title_info, FILENAME_DEFAULT_FONT);
-    if (error)
-        log_fatal("Could not load title font");
-    geo.font_height = config.titles_enabled ? TTF_FontHeight(title_info.font) : 0;
+// A function to find the directory holding the shelf's fonts, textures and room photograph
+static void find_assets()
+{
+    const char *probe = "textures" PATH_SEPARATOR "oak_diff_h.jpg";
+    char buffer[MAX_PATH_CHARS + 1];
+    const char *candidates[4];
+    int n = 0;
+    if (config.assets_dir != NULL)
+        candidates[n++] = config.assets_dir;
+    char exe_assets[MAX_PATH_CHARS + 1];
+    if (config.exe_path != NULL)
+        candidates[n++] = join_paths(exe_assets, sizeof(exe_assets), 2, config.exe_path, PATH_ASSETS_EXE);
+#ifdef __unix__
+    candidates[n++] = PATH_ASSETS_SYSTEM;
+#endif
+    candidates[n++] = CURRENT_DIRECTORY PATH_ASSETS_EXE;
+    for (int i = 0; i < n; i++) {
+        join_paths(buffer, sizeof(buffer), 2, candidates[i], probe);
+        if (file_exists(buffer)) {
+            copy_string(assets_dir, candidates[i], sizeof(assets_dir));
+            log_debug("Shelf assets found in %s", assets_dir);
+            return;
+        }
+    }
+    log_fatal("Could not find the shelf assets (fonts, textures, env). Set Assets= in the [Shelf] section of config.ini");
 }
 
 // A function to close subsystems and free memory before quitting
 static void cleanup()
 {
-    // Wait until all threads have completed
-    SDL_WaitThread(Slideshowhread, NULL);
-    SDL_WaitThread(clock_thread, NULL);
-    
-    // Destroy renderer and window
-    if (renderer != NULL) {
-        SDL_DestroyRenderer(renderer);
-        renderer = NULL;
+    SDL_WaitThread(slideshow_thread, NULL);
+    overlay_quit();
+    shelf_quit();
+    font_cache_clear();
+    if (gl_context != NULL) {
+        SDL_GL_DeleteContext(gl_context);
+        gl_context = NULL;
     }
     if (window != NULL) {
         SDL_DestroyWindow(window);
@@ -340,8 +389,7 @@ static void cleanup()
     SDL_Quit();
     IMG_Quit();
     TTF_Quit();
-    quit_svg();
-    if (config.background_mode == BACKGROUND_SLIDESHOW)
+    if (slideshow != NULL)
         quit_slideshow();
 
     // Close log file if open
@@ -357,11 +405,10 @@ static void cleanup()
     free(config.clock_font_path);
     free(config.gamepad_mappings_file);
     free(config.startup_cmd);
-    free(config.quit_cmd);
-    free(highlight);
-    free(scroll);
-    free(screensaver);
-    free(clk);
+    free(config.assets_dir);
+    free(config.room_hdr);
+    free(config.capture_path);
+    free(config.test_keys);
 
     // Free menu and entry linked lists
     Entry *entry = NULL;
@@ -383,6 +430,15 @@ static void cleanup()
         tmp_menu = menu;
         menu = menu->next;
         free(tmp_menu);
+    }
+
+    for (BookStyle *i = config.book_styles; i != NULL;) {
+        BookStyle *next = i->next;
+        free(i->title);
+        free(i->color);
+        free(i->note);
+        free(i);
+        i = next;
     }
 
     // Free hotkey linked list
@@ -407,103 +463,49 @@ static void cleanup()
         disconnect_gamepad(-1, false, true);
 }
 
-// A function to handle key presses from keyboard
-static void handle_keypress(SDL_Keysym *key)
-{
-    if (config.debug)
-        log_debug("Key %s (#%X) detected", SDL_GetKeyName(key->sym), key->sym);
-
-    // Check default keys
-    if (key->sym == SDLK_LEFT)
-        move_left();
-    else if (key->sym == SDLK_RIGHT)
-        move_right();
-    else if (key->sym == SDLK_RETURN) {
-        log_debug("Selected Entry:\n"
-            "Title: %s\n"
-            "Icon Path: %s\n"
-            "Command: %s", 
-            current_entry->title, 
-            current_entry->icon_path, 
-            current_entry->cmd
-        );
-        
-        execute_command(current_entry->cmd);
-    }
-    else if (key->sym == SDLK_BACKSPACE)
-        load_back_menu(current_menu);
-
-    //Check hotkeys
-    else {
-        for (Hotkey *i = hotkeys; i != NULL; i = i->next) {
-            if (key->sym == i->keycode) {
-                execute_command(i->cmd);
-                break;
-            }
-        }
-    }
-}
-
 // A function to quit the slideshow mode in case of error or program exit
 void quit_slideshow()
 {
-    // Free allocated image paths
     for (int i = 0; i < slideshow->num_images; i++)
         free(slideshow->images[i]);
     free(slideshow->images);
     free(slideshow->order);
     free(slideshow);
+    slideshow = NULL;
 }
 
 // A function to initialize the slideshow background mode
 static void init_slideshow()
 {
-    if (!directory_exists(config.slideshow_directory)) {
-        log_error("Slideshow directory '%s' does not exist, "
-            "Switching to color background mode",
-            config.slideshow_directory
-        );
-        config.background_mode = BACKGROUND_COLOR;
-        set_draw_color();
+    if (config.slideshow_directory == NULL || !directory_exists(config.slideshow_directory)) {
+        log_error("Slideshow directory '%s' does not exist, switching to the wall background",
+            config.slideshow_directory ? config.slideshow_directory : "");
+        config.background_mode = BACKGROUND_WALL;
         return;
     }
-    // Allocate and initialize slideshow struct
     slideshow = malloc(sizeof(Slideshow));
     *slideshow = (Slideshow) {
         .i = -1,
         .num_images = 0,
         .transition_surface = NULL,
-        .transition_texture = NULL,
         .transition_alpha = 0.f,
         .transition_change_rate = 0.f,
         .images = NULL,
         .order = NULL
     };
-
-    // Find background images from directory
     scan_slideshow_directory(slideshow, config.slideshow_directory);
-    
-    // Handle errors
     if (!slideshow->num_images) {
-        log_error("No images found in slideshow directory '%s', "
-            "Changing background mode to color", 
-            config.slideshow_directory
-        );
-        config.background_mode = BACKGROUND_COLOR;
+        log_error("No images found in slideshow directory '%s', switching to the wall background",
+            config.slideshow_directory);
+        config.background_mode = BACKGROUND_WALL;
         quit_slideshow();
-    } 
+    }
     else if (slideshow->num_images == 1) {
-        log_error("Only one image found in slideshow directory %s"
-            "Changing background mode to single image", 
-            config.slideshow_directory
-        );
         free(config.background_image);
         config.background_image = strdup(slideshow->images[0]);
         config.background_mode = BACKGROUND_IMAGE;
         quit_slideshow();
     }
-
-    // Generate array of random numbers for image order, load first image
     else {
         slideshow->order = malloc(sizeof(int) * (size_t) slideshow->num_images);
         random_array(slideshow->order, slideshow->num_images);
@@ -512,316 +514,412 @@ static void init_slideshow()
     }
 }
 
-// A function to initialize the screensaver feature
-static void init_screensaver()
-{
-    // Allocate memory for structure
-    screensaver = malloc(sizeof(Screensaver));
-    
-    // Convert intensity string to float
-    char intensity[PERCENT_MAX_CHARS];
-    if (config.screensaver_intensity_str[0] != '\0')
-        copy_string(intensity, config.screensaver_intensity_str, sizeof(intensity));
-    else
-        copy_string(intensity, DEFAULT_SCREENSAVER_INTENSITY, sizeof(intensity));
-    size_t length = strlen(intensity);
-    intensity[length - 1] = '\0';
-    float percent = (float) atof(intensity);
+// ---------- the shelf ----------
 
-    // Calculate alpha end value
-    screensaver->alpha_end_value = 255.0f * percent / 100.0f;
-    if (screensaver->alpha_end_value < 1.0f) {
-        log_error("Invalid screensaver intensity value, disabling feature");
-        config.screensaver_enabled = false;
-        free(screensaver);
-        screensaver = NULL;
+static ShelfBackground shelf_background()
+{
+    switch (config.background_mode) {
+        case BACKGROUND_COLOR: return SHELF_BG_COLOR;
+        case BACKGROUND_IMAGE:
+        case BACKGROUND_SLIDESHOW: return SHELF_BG_PHOTO;
+        case BACKGROUND_TRANSPARENT: return SHELF_BG_TRANSPARENT;
+        case BACKGROUND_ROOM: return SHELF_BG_ROOM;
+        default: return SHELF_BG_WALL;
+    }
+}
+
+static const BookStyle *find_style(const char *title)
+{
+    for (BookStyle *i = config.book_styles; i != NULL; i = i->next) {
+        if (!strcmp(i->title, title))
+            return i;
+    }
+    return NULL;
+}
+
+// A cover line for entries that have none in [Book Notes]
+static const char *default_note(const char *cmd, char *buffer, size_t size)
+{
+    if (!strncmp(cmd, SCMD_SUBMENU, strlen(SCMD_SUBMENU))) {
+        const char *name = cmd + strlen(SCMD_SUBMENU);
+        while (*name == ' ')
+            name++;
+        snprintf(buffer, size, "%s menu", name);
+        return buffer;
+    }
+    if (!strcmp(cmd, SCMD_SHUTDOWN)) return "Turns the PC off";
+    if (!strcmp(cmd, SCMD_RESTART)) return "Restarts the PC";
+    if (!strcmp(cmd, SCMD_SLEEP)) return "Puts the PC to sleep";
+    if (!strcmp(cmd, SCMD_QUIT)) return "Closes Flex Launcher";
+    if (!strcmp(cmd, SCMD_HOME)) return "Back to the first shelf";
+    if (!strcmp(cmd, SCMD_BACK)) return "The previous shelf";
+    return NULL;
+}
+
+static float shelf_quality_scale()
+{
+    // never draw more than 1080p worth of scene pixels on a low-power GPU; High lifts that cap
+    float cap = 1920.f / (float) win_w;
+    if (config.quality == QUALITY_HIGH)
+        return 1.f;
+    if (config.quality == QUALITY_LOW)
+        return fminf(1.f, cap) * 0.75f;
+    return fminf(1.f, cap);
+}
+
+// A function to set up the renderer and the empty room
+static void setup_shelf()
+{
+    ShelfConfig sc;
+    memset(&sc, 0, sizeof(sc));
+    copy_string(sc.assets, assets_dir, sizeof(sc.assets));
+    if (config.room_hdr != NULL)
+        copy_string(sc.room_hdr, config.room_hdr, sizeof(sc.room_hdr));
+    sc.background = shelf_background();
+    sc.wall_color[0] = config.background_color.r;
+    sc.wall_color[1] = config.background_color.g;
+    sc.wall_color[2] = config.background_color.b;
+    sc.chroma_key[0] = config.chroma_key_color.r;
+    sc.chroma_key[1] = config.chroma_key_color.g;
+    sc.chroma_key[2] = config.chroma_key_color.b;
+    sc.overlay = config.background_overlay ? 1.f - (float) config.background_overlay_color.a / 255.f : 1.f;
+    sc.per_page = (int) config.max_buttons;
+    sc.spine_titles = config.spine_titles;
+    sc.msaa = config.quality == QUALITY_LOW ? 0 : 4;
+    base_scale = quality_scale = shelf_quality_scale();
+    sc.scale = quality_scale;
+    if (!shelf_init(&sc, win_w, win_h, gles))
+        log_fatal("Could not set up the shelf renderer (%s)", render_info());
+}
+
+static void frame(void);
+static void save_capture(const char *path);
+
+// One frame of the loading screen: the room and the overlay are up while books are painted
+static void loading_frame()
+{
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_QUIT)
+            quit(EXIT_SUCCESS);
+    }
+    ticks.main = SDL_GetTicks();
+    frame();
+
+    // Test hook: --keys loading captures the loading screen itself
+    if (config.capture_path != NULL && config.test_keys != NULL && !strcmp(config.test_keys, "loading")) {
+        Uint32 until = SDL_GetTicks() + (Uint32) config.capture_wait;
+        while (SDL_GetTicks() < until) {
+            ticks.main = SDL_GetTicks();
+            frame();
+        }
+        save_capture(config.capture_path);
+        quit(EXIT_SUCCESS);
+    }
+}
+
+// A function to paint every book, one menu at a time
+static void build_shelf()
+{
+    for (Menu *menu = config.first_menu; menu != NULL; menu = menu->next) {
+        menu->shelf_index = -1;
+        menu->focus = 0;
+        if (menu->num_entries == 0)
+            continue;
+        ShelfBook *books = calloc(menu->num_entries, sizeof(ShelfBook));
+        char (*notes)[256] = calloc(menu->num_entries, sizeof(*notes));
+        int k = 0;
+        for (Entry *e = menu->first_entry; e != NULL; e = e->next, k++) {
+            ShelfBook *b = &books[k];
+            b->title = e->title;
+            b->icon = e->icon_path;
+            b->icon_selected = (e->icon_selected_path != NULL && file_exists(e->icon_selected_path)) ? e->icon_selected_path : NULL;
+            b->ink = -1;
+            const BookStyle *style = find_style(e->title);
+            const char *note = style && style->note ? style->note : default_note(e->cmd, notes[k], sizeof(notes[k]));
+            if (note != NULL && note != notes[k])
+                copy_string(notes[k], note, sizeof(notes[k]));
+            b->note = note != NULL ? notes[k] : NULL;
+            if (style && style->color && style->color[0] == '#') {
+                char hex[8];
+                copy_string(hex, style->color, sizeof(hex));
+                b->color = rgba_hex(hex, 1.f);
+                b->has_color = true;
+                if (strstr(style->color, ";dark"))
+                    b->ink = 1;
+                else if (strstr(style->color, ";light"))
+                    b->ink = 0;
+            }
+        }
+        menu->shelf_index = shelf_add_menu(books, (int) menu->num_entries);
+        free(notes);
+        free(books);
+        loading_frame();
+    }
+}
+
+static Entry *entry_at(Menu *menu, int index)
+{
+    Entry *e = menu->first_entry;
+    for (int i = 0; i < index && e != NULL; i++)
+        e = e->next;
+    return e;
+}
+
+// Push the menu trail and the page rail to the overlay
+static void update_hud()
+{
+    const char *trail[32];
+    int n = 0;
+    for (Menu *m = current_menu; m != NULL && n < 32; m = m->back)
+        trail[n++] = m->name;
+    for (int i = 0; i < n / 2; i++) {
+        const char *t = trail[i];
+        trail[i] = trail[n - 1 - i];
+        trail[n - 1 - i] = t;
+    }
+    overlay_set_trail(trail, n);
+    overlay_set_rail((int) current_menu->num_entries, current_menu->focus, shelf_per_page());
+    current_entry = entry_at(current_menu, current_menu->focus);
+    animating = true;
+}
+
+static void kick()
+{
+    animating = true;
+}
+
+// A function to move the selection; at either end it bumps unless entries wrap
+static void move(int direction)
+{
+    int n = (int) current_menu->num_entries;
+    int i = current_menu->focus + direction;
+    if (i < 0)
+        i = config.wrap_entries ? n - 1 : 0;
+    if (i >= n)
+        i = config.wrap_entries ? 0 : n - 1;
+    if (i == current_menu->focus) {
+        shelf_bump(direction);
+        kick();
         return;
     }
-    else if (screensaver->alpha_end_value >= 255.0f)
-        screensaver->alpha_end_value = 255.0f;
-
-    screensaver->transition_change_rate = screensaver->alpha_end_value / ((float) SCREENSAVER_TRANSITION_TIME / (float) refresh_period);
-    
-    // Render texture
-    SDL_Surface *surface = NULL;
-    surface = SDL_CreateRGBSurfaceWithFormat(0, 
-                  geo.screen_width, 
-                  geo.screen_height, 
-                  32,
-                  SDL_PIXELFORMAT_ARGB8888
-              );
-    Uint32 color = SDL_MapRGBA(surface->format, 0, 0, 0, 0xFF);
-    SDL_FillRect(surface, NULL, color);
-    screensaver->texture = load_texture(surface);
-    screensaver->alpha = 0.0f;
-    SDL_SetTextureAlphaMod(screensaver->texture, 0.0f);
+    current_menu->focus = i;
+    shelf_focus(i);
+    update_hud();
 }
 
-// A function to resume the slideshow after a launched application returns
-static void resume_slideshow()
+static void swap_to(Menu *to, int direction)
 {
-    ticks.slideshow_load = ticks.main;
+    shelf_swap_menu(to->shelf_index, to->focus, direction);
+    current_menu = to;
+    update_hud();
 }
 
-// A function to load a menu
-static int load_menu(Menu *menu, bool set_back_menu, bool reset_position)
+// A function to open a submenu; it remembers where you were in it
+static void open_menu(const char *name)
 {
-    if (menu == NULL)
-        return 1;
-
-    unsigned int buttons;
-    Menu *previous_menu = current_menu;
-
-    current_menu = menu;
-    log_debug("Loading menu '%s'", current_menu->name);
-
-    // Return error if the menu doesn't contain entires
-    if (current_menu->num_entries == 0) {
-        log_error("No valid entries found for Menu '%s'", current_menu->name);
-        current_menu = previous_menu;
-        return 1;
+    Menu *menu = get_menu(name);
+    if (menu == NULL || menu->shelf_index < 0) {
+        log_error("Menu '%s' not found or has no entries", name);
+        shelf_bump(1);
+        kick();
+        return;
     }
-
-    // Render the menu if not already rendered
-    if (current_menu->rendered == false)
-        render_buttons(current_menu);
-
-    // Set menu properties
-    if (set_back_menu)
-        current_menu->back = previous_menu;
-
-    if (reset_position) {
-        current_entry = current_menu->first_entry;
-        current_menu->root_entry = current_entry;
-        current_menu->highlight_position = 0;
-        current_menu->page = 0;
-    }
-    else
-        current_entry = current_menu->last_selected_entry;
-
-    buttons = current_menu->num_entries - (current_menu->page)*config.max_buttons;
-    if (buttons > config.max_buttons)
-        buttons = config.max_buttons;
-    
-    // Recalculate the screen geometry
-    calculate_button_geometry(current_menu->root_entry, (int) buttons);
-    if (config.highlight) {
-        highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
-        highlight->rect.y = current_entry->icon_rect.y - config.highlight_vpadding;
-    }
-    return 0;
-}
-
-// A function to load a menu by its name
-static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool reset_position)
-{
-    Menu *menu = get_menu(menu_name);
-    return load_menu(menu, set_back_menu, reset_position);
-}
-
-// A function to calculate the layout of the buttons
-static void calculate_button_geometry(Entry *entry, int buttons)
-{
-    // Calculate proper spacing
-    geo.x_margin = (geo.screen_width - config.icon_size*buttons -
-                   buttons*config.icon_spacing + config.icon_spacing) / 2;
-    geo.x_advance = config.icon_size + config.icon_spacing;
-    geo.num_buttons = buttons;
-
-    // Assign values to entries
-    for (int i = 0; i < geo.num_buttons; i++) {
-            entry->icon_rect.x = geo.x_margin + i*geo.x_advance;
-            entry->icon_rect.y = geo.y_margin;
-            entry->icon_rect.w = config.icon_size;
-            entry->icon_rect.h = config.icon_size;
-            entry->text_rect.x = entry->icon_rect.x +
-                                 (entry->icon_rect.w - entry->text_rect.w) / 2;
-            entry->text_rect.y = entry->icon_rect.y + config.icon_size + entry->title_offset + 
-                                 config.title_padding;
-            entry = entry->next;
-    }
-}
-
-// A function to render all buttons (icon and text) for a menu
-static void render_buttons(Menu *menu)
-{
-    Entry *entry;
-    int h;
-    for (entry = menu->first_entry; entry != NULL; entry = entry->next) {
-        entry->icon = load_texture_from_file(entry->icon_path);
-        entry->icon_selected = (entry->icon_selected_path != NULL) ? load_texture_from_file(entry->icon_selected_path) : NULL;
-        if (config.titles_enabled) {
-            entry->title_texture = render_text_texture(entry->title, &title_info, &entry->text_rect, &h);
-            if (config.title_oversize_mode == OVERSIZE_SHRINK && h != geo.font_height)
-                entry->title_offset = (geo.font_height - h) / 2;
-        }
-    }
-    menu->rendered = true;
-}
-
-// A function to move the selection left when clicked by user
-static void move_left()
-{
-    // If we are not in leftmost position, move highlight left
-    if (current_menu->highlight_position > 0) {
-        if (config.highlight)
-            highlight->rect.x -= geo.x_advance;
-        current_menu->highlight_position--;
-        current_entry = current_entry->previous;
-    }
-
-    // If we are in leftmost position...
-    else if (current_menu->highlight_position == 0 && (current_menu->page > 0 || config.wrap_entries)) {
-        unsigned int buttons;
-        current_entry = current_entry->previous;
-
-        // Load the previous page if there is a valid previous entry
-        if (current_entry) {
-            buttons = config.max_buttons;
-            current_menu->root_entry = advance_entries(current_menu->root_entry, (int) buttons, DIRECTION_LEFT);
-            current_menu->page--;
-        }
-
-        // If the user has the wrap entries setting, select the last entry in the menu
-        else {
-            current_entry = advance_entries(current_menu->first_entry, (int) current_menu->num_entries - 1, DIRECTION_RIGHT);
-            unsigned int num_pages = DIV_ROUND_UP(current_menu->num_entries, config.max_buttons);
-            current_menu->root_entry = advance_entries(current_menu->root_entry,
-                (int) ((num_pages - 1 - current_menu->page) * config.max_buttons),
-                DIRECTION_RIGHT
-            );
-            current_menu->page = num_pages - 1;
-            buttons = current_menu->num_entries - current_menu->page * config.max_buttons;
-        }
-
-        calculate_button_geometry(current_menu->root_entry, (int) buttons);
-        if (config.highlight)
-            highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
-        current_menu->highlight_position = buttons - 1;
-    }
-}
-
-// A function to move the selection right when clicked by the user
-static void move_right()
-{
-    // If we are not in the rightmost position, move highlight right
-    if ((int) current_menu->highlight_position < (geo.num_buttons - 1)) {
-        if (config.highlight)
-            highlight->rect.x += geo.x_advance;
-        current_menu->highlight_position++;
-        current_entry = current_entry->next;
-    }
-
-    // If we are in the rightmost postion, but there are more entries in the menu, load next page
-    else if (current_menu->highlight_position + current_menu->page*config.max_buttons <
-    (current_menu->num_entries - 1)) {
-        unsigned int buttons = current_menu->num_entries - (current_menu->page + 1)*config.max_buttons;
-        if (buttons > config.max_buttons)
-            buttons = config.max_buttons;
-        current_entry = current_entry->next;
-        current_menu->root_entry = current_entry;
-        calculate_button_geometry(current_menu->root_entry, (int) buttons);
-        if (config.highlight)
-            highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
-        current_menu->page++;
-        current_menu->highlight_position = 0;
-    }
-
-    // If user has the wrap entries setting, reset menu to first entry
-    else if (config.wrap_entries) {
-        current_entry = current_menu->first_entry;
-        current_menu->root_entry = current_entry;
-        current_menu->highlight_position = 0;
-        current_menu->page = 0;
-        if (config.highlight)
-            highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
-        calculate_button_geometry(current_menu->root_entry, (int) MIN(current_menu->num_entries, config.max_buttons));
-    }
-}
-
-// A function to load a submenu
-static void load_submenu(const char *submenu)
-{
-    current_menu->last_selected_entry = current_entry;
-    load_menu_by_name(submenu, true, true);
+    if (menu == current_menu)
+        return;
+    menu->back = current_menu;
+    swap_to(menu, 1);
 }
 
 // A function to load the previous menu
-static void load_back_menu(Menu *menu)
+static void go_back()
 {
-    load_menu(menu->back, false, config.reset_on_back);
+    if (current_menu->back == NULL) {
+        shelf_bump(-1);
+        kick();
+        return;
+    }
+    Menu *to = current_menu->back;
+    if (config.reset_on_back) {
+        current_menu->focus = 0;
+        to->focus = 0;
+    }
+    current_menu->back = NULL;
+    swap_to(to, -1);
 }
 
-// A function to update the screen with all visible textures
-static void draw_screen()
+static void go_home()
 {
-    // Draw background
-    SDL_RenderClear(renderer);
-    if (!(state.application_launching && config.on_launch == ON_LAUNCH_BLANK)) {
-        if (config.background_mode == BACKGROUND_IMAGE || config.background_mode == BACKGROUND_SLIDESHOW)
-            SDL_RenderCopy(renderer, background_texture, NULL, NULL);
+    if (current_menu == default_menu)
+        return;
+    for (Menu *m = config.first_menu; m != NULL; m = m->next)
+        m->back = NULL;
+    if (config.reset_on_back)
+        default_menu->focus = 0;
+    swap_to(default_menu, -1);
+}
 
-        if (config.background_mode == BACKGROUND_SLIDESHOW && state.slideshow_transition)
-            SDL_RenderCopy(renderer, slideshow->transition_texture, NULL, NULL);
+// ---------- launching ----------
 
-        // Draw background overlay
-        if (config.background_overlay)
-            SDL_RenderCopy(renderer, background_overlay, NULL, NULL);
+// Back from an application (or it never came): pull out of the page, close the cover, shelve the book
+static void finish_launch(bool returned_book)
+{
+    UNUSED(returned_book);
+    shelf_launch_close();
+    launch.page_pending = false;
+    overlay_unblank();
+    overlay_status(NULL);
+    launch.phase = LAUNCH_IDLE;
+    state.busy = false;
+    state.wait_key = false;
+    kick();
+}
 
-        // Draw scroll indicators
-        if (config.scroll_indicators &&
-        (current_menu->page*config.max_buttons + (unsigned int) geo.num_buttons) <= (current_menu->num_entries - 1))
-            SDL_RenderCopy(renderer, scroll->texture, NULL, &scroll->rect_right);
+// A function to start an application with the eject, blank screen and timeout around it
+static void launch_application(Entry *entry, const char *cmd)
+{
+    state.busy = true;
+    launch.entry = entry;
+    copy_string(launch.cmd, cmd, sizeof(launch.cmd));
+    launch.t0 = ticks.main;
+    launch.phase = LAUNCH_EJECT;
+    if (entry != NULL)
+        shelf_launch_pull(true);
+    kick();
+}
 
-        if (config.scroll_indicators && current_menu->page > 0)
-            SDL_RenderCopyEx(renderer, scroll->texture, NULL, &scroll->rect_left, 0, NULL, SDL_FLIP_HORIZONTAL);
-
-        // Draw clock
-        if (config.clock_enabled) {
-            SDL_RenderCopy(renderer, clk->time_texture, NULL, &clk->time_rect);
-            if (config.clock_show_date)
-                SDL_RenderCopy(renderer, clk->date_texture, NULL, &clk->date_rect);
-        }
-
-        // Draw highlight
-        if (config.highlight)
-            SDL_RenderCopy(renderer,
-                highlight->texture,
-                NULL,
-                &highlight->rect
-            );
-
-        // Draw buttons
-        Entry *entry = current_menu->root_entry;
-        SDL_Texture *icon;
-        for (int i = 0; i < geo.num_buttons; i++) {
-            icon = (entry->icon_selected != NULL && i == (int) current_menu->highlight_position) ? entry->icon_selected : entry->icon;
-            SDL_RenderCopy(renderer, icon, NULL, &entry->icon_rect);
-            if (config.titles_enabled)
-                SDL_RenderCopy(renderer, entry->title_texture, NULL, &entry->text_rect);
-            entry = entry-> next;
-        }
-
-        // Draw screensaver
-        if (state.screensaver_active)
-            SDL_RenderCopy(renderer, screensaver->texture, NULL, NULL);
+static void start_launch()
+{
+    char text[512];
+    const char *title = launch.entry ? launch.entry->title : launch.cmd;
+    snprintf(text, sizeof(text), "Starting %s", title);
+    if (config.on_launch == ON_LAUNCH_NONE)
+        overlay_status(text);
+    else if (launch.entry != NULL) {
+        // the book opens and the camera goes into its first page; the loader is printed there
+        shelf_launch_open();
+        launch.page_pending = true;
     }
     else
-        SDL_RenderFillRect(renderer, NULL);
+        overlay_blank(NULL, text, "", true);
 
-    // Output to screen
-    SDL_RenderPresent(renderer);
-    if (!config.vsync) {
-        Uint32 elapsed = SDL_GetTicks() - ticks.main;
-        if (elapsed < refresh_period)
-            SDL_Delay(refresh_period - elapsed);
+    char *cmd = strdup(launch.cmd);
+    bool started = start_process(cmd, true);
+    free(cmd);
+    if (!started) {
+        char body[256];
+        snprintf(text, sizeof(text), "%s didn't start", title);
+        snprintf(body, sizeof(body), "The command could not be run. Check its command in config.ini:");
+        finish_launch(launch.entry == NULL);
+        overlay_toast(text, body, launch.cmd);
+        return;
     }
+    if (config.on_launch == ON_LAUNCH_QUIT) {
+        if (!launch.page_pending)
+            quit(EXIT_SUCCESS);
+        launch.quit_after = true;
+    }
+    state.application_launching = true;
+    ticks.application_launched = ticks.main;
+    launch.phase = LAUNCH_WAITING;
+}
+
+// Shutdown, restart and sleep: a blank screen first, then the system command
+static void power_command(Entry *entry, const char *cmd)
+{
+    state.busy = true;
+    launch.entry = entry;
+    copy_string(launch.power, cmd, sizeof(launch.power));
+    const char *icon = entry ? entry->icon_path : NULL;
+    if (!strcmp(cmd, SCMD_SHUTDOWN))
+        overlay_blank(icon, "Shutting down", "The PC turns off now.", true);
+    else if (!strcmp(cmd, SCMD_RESTART))
+        overlay_blank(icon, "Restarting", "Back in a moment.", true);
+    else
+        overlay_blank(icon, "Going to sleep", "Press any key when you're back.", false);
+    launch.t0 = ticks.main;
+    launch.phase = LAUNCH_POWER;
+    kick();
+}
+
+static void update_launch()
+{
+    Uint32 elapsed = ticks.main - launch.t0;
+    if (launch.page_pending && shelf_zoom() > 0.97f) {
+        char text[512];
+        snprintf(text, sizeof(text), "Starting %s", launch.entry ? launch.entry->title : launch.cmd);
+        overlay_blank_page(launch.entry ? launch.entry->icon_path : NULL, text, "", true);
+        launch.page_pending = false;
+    }
+    if (launch.quit_after && !launch.page_pending && overlay_blanked())
+        quit(EXIT_SUCCESS);
+    if (launch.phase == LAUNCH_EJECT && elapsed >= EJECT_TIME)
+        start_launch();
+    else if (launch.phase == LAUNCH_POWER && elapsed >= BLANK_TIME) {
+        launch.phase = LAUNCH_POWER_SENT;
+        launch.t0 = ticks.main;
+        if (!strcmp(launch.power, SCMD_SHUTDOWN))
+            scmd_shutdown();
+        else if (!strcmp(launch.power, SCMD_RESTART))
+            scmd_restart();
+        else {
+            scmd_sleep();
+            state.wait_key = true;
+        }
+    }
+    else if (launch.phase == LAUNCH_POWER_SENT && strcmp(launch.power, SCMD_SLEEP) && elapsed >= POWER_TIMEOUT) {
+        bool off = !strcmp(launch.power, SCMD_SHUTDOWN);
+        finish_launch(true);
+        overlay_toast(off ? "The PC didn't turn off" : "The PC didn't restart",
+            "Flex Launcher sent the command, but the system is still running. Check that this user may run:",
+            off ? CMD_SHUTDOWN : CMD_RESTART);
+    }
+    else if (launch.phase == LAUNCH_CLOSING && elapsed >= BLANK_TIME)
+        quit(EXIT_SUCCESS);
+    else if (launch.phase == LAUNCH_WAITING && state.application_launching &&
+    ticks.main - ticks.application_launched > config.application_timeout) {
+        // the window never appeared
+        state.application_launching = false;
+        char title[512], body[256];
+        snprintf(title, sizeof(title), "%s didn't start", launch.entry ? launch.entry->title : launch.cmd);
+        snprintf(body, sizeof(body), "Flex Launcher waited %u s for it to open. Check its command in config.ini:",
+            (unsigned) (config.application_timeout / 1000));
+        finish_launch(launch.entry == NULL);
+        overlay_toast(title, body, launch.cmd);
+    }
+}
+
+static void select_entry()
+{
+    if (current_entry == NULL)
+        return;
+    log_debug("Selected Entry:\n"
+        "Title: %s\n"
+        "Icon Path: %s\n"
+        "Command: %s",
+        current_entry->title,
+        current_entry->icon_path,
+        current_entry->cmd
+    );
+    const char *cmd = current_entry->cmd;
+    if (!strcmp(cmd, SCMD_SHUTDOWN) || !strcmp(cmd, SCMD_RESTART) || !strcmp(cmd, SCMD_SLEEP))
+        power_command(current_entry, cmd);
+    else if (!strcmp(cmd, SCMD_QUIT)) {
+        state.busy = true;
+        overlay_blank(current_entry->icon_path, "Closing Flex Launcher", "", false);
+        launch.phase = LAUNCH_CLOSING;
+        launch.t0 = ticks.main;
+        kick();
+    }
+    else if (cmd[0] == ':')
+        execute_command(cmd);
+    else
+        launch_application(current_entry, cmd);
 }
 
 // A function to execute the user's command
 static void execute_command(const char *command)
 {
-    // Copy command into separate buffer
     char *cmd = strdup(command);
 
     // Parse special commands
@@ -831,7 +929,7 @@ static void execute_command(const char *command)
         if (!strcmp(special_command, SCMD_SUBMENU)) {
             char *submenu = strtok(NULL, "");
             if (submenu != NULL)
-                load_submenu(submenu);
+                open_menu(submenu);
         }
         else if (!strcmp(special_command, SCMD_FORK)) {
             char *fork_command = strtok(NULL, "");
@@ -839,38 +937,86 @@ static void execute_command(const char *command)
                 start_process(fork_command, false);
         }
         else if (!strcmp(special_command, SCMD_LEFT))
-            move_left();
+            move(-1);
         else if (!strcmp(special_command, SCMD_RIGHT))
-            move_right();
+            move(1);
         else if (!strcmp(special_command, SCMD_SELECT))
-            execute_command(current_entry->cmd);
+            select_entry();
         else if (!strcmp(special_command, SCMD_HOME))
-            load_menu(default_menu, false, true);
+            go_home();
         else if (!strcmp(special_command, SCMD_BACK))
-            load_back_menu(current_menu);
+            go_back();
         else if (!strcmp(special_command, SCMD_QUIT))
             quit(EXIT_SUCCESS);
-        else if (!strcmp(special_command, SCMD_SHUTDOWN))
-            scmd_shutdown();
-        else if (!strcmp(special_command, SCMD_RESTART))
-            scmd_restart();
-        else if (!strcmp(special_command, SCMD_SLEEP))
-            scmd_sleep();
+        else if (!strcmp(special_command, SCMD_SHUTDOWN) || !strcmp(special_command, SCMD_RESTART) ||
+        !strcmp(special_command, SCMD_SLEEP))
+            power_command(NULL, special_command);
     }
 
-    // Launch external application
-    else {
-        SDL_Delay(50);
-        if (start_process(cmd, true)) {
-            state.application_launching = true;
-            ticks.application_launched = ticks.main;
-            if (config.on_launch == ON_LAUNCH_BLANK)
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
-            else if (config.on_launch == ON_LAUNCH_QUIT)
-                quit(EXIT_SUCCESS);
+    // Launch external application from a hotkey
+    else
+        launch_application(NULL, cmd);
+    free(cmd);
+}
+
+// ---------- input ----------
+
+// The first input after the lights went down only brings them back up
+static bool wake()
+{
+    ticks.last_input = ticks.main;
+    if (!dimmed)
+        return false;
+    dimmed = false;
+    shelf_dim(0.f, false);
+    overlay_dim(false);
+    state.screensaver_active = false;
+    state.slideshow_paused = false;
+    ticks.slideshow_load = ticks.main;
+    kick();
+    return true;
+}
+
+// Every input goes through here: waking, dismissing the blank screen, then the command
+static void command(const char *cmd)
+{
+    if (wake())
+        return;
+    if (state.busy) {
+        if (state.wait_key)
+            finish_launch(true);
+        return;
+    }
+    if (cmd != NULL)
+        execute_command(cmd);
+}
+
+// A function to handle key presses from keyboard
+static void handle_keypress(SDL_Keysym *key)
+{
+    if (config.debug)
+        log_debug("Key %s (#%X) detected", SDL_GetKeyName(key->sym), key->sym);
+
+    // Hotkeys first, so a config can take any key
+    for (Hotkey *i = hotkeys; i != NULL; i = i->next) {
+        if (key->sym == i->keycode) {
+            command(i->cmd);
+            return;
         }
     }
-    free(cmd);
+    switch (key->sym) {
+        case SDLK_LEFT: command(SCMD_LEFT); break;
+        case SDLK_RIGHT: command(SCMD_RIGHT); break;
+        case SDLK_RETURN:
+        case SDLK_KP_ENTER:
+        case SDLK_SPACE: command(SCMD_SELECT); break;
+        case SDLK_BACKSPACE:
+        case SDLK_ESCAPE:
+        case SDLK_AC_BACK: command(SCMD_BACK); break;
+        case SDLK_HOME:
+        case SDLK_AC_HOME: command(SCMD_HOME); break;
+        default: command(NULL); break;
+    }
 }
 
 // A function to initialize the gamepad struct
@@ -961,32 +1107,23 @@ static void disconnect_gamepad(int id, bool disconnect, bool remove)
     }
 }
 
-// A function to poll the connected gamepad for commands
+// A function to poll the connected gamepad for commands; only left and right repeat when held
 static void poll_gamepad()
 {
-    int value_multiplier; // Handles positive or negative axis
+    int value_multiplier = 1;
     bool pressed;
     for (GamepadControl *i = gamepad_controls; i != NULL; i = i->next) {
         pressed = false;
         for (Gamepad *gamepad = gamepads; gamepad != NULL; gamepad = gamepad->next) {
-
-            // Check if axis value exceeds dead zone
             if (i->type == TYPE_AXIS_POS || i->type == TYPE_AXIS_NEG) {
-                if (i->type == TYPE_AXIS_POS)
-                    value_multiplier = 1;
-                else if (i->type == TYPE_AXIS_NEG)
-                    value_multiplier = -1;
+                value_multiplier = i->type == TYPE_AXIS_POS ? 1 : -1;
                 if (value_multiplier*SDL_GameControllerGetAxis(gamepad->controller, i->index) > GAMEPAD_DEADZONE) {
-                    i->repeat++;
                     pressed = true;
                     break;
                 }
             }
-
-            // Check buttons
             else if (i->type == TYPE_BUTTON) {
                 if (SDL_GameControllerGetButton(gamepad->controller, i->index)) {
-                    i->repeat++;
                     pressed = true;
                     break;
                 }
@@ -997,148 +1134,99 @@ static void poll_gamepad()
             continue;
         }
 
-        // Execute command if first press or valid repeat
-        if (i->repeat == 1) {
+        // repeat holds the time of the next repeat; 0 means the control was up
+        if (i->repeat == 0) {
             log_debug("Gamepad %s detected", i->label);
-            ticks.last_input = ticks.main;
-            execute_command(i->cmd);
+            i->repeat = ticks.main + REPEAT_DELAY;
+            command(i->cmd);
         }
-        else if (i->repeat == delay_period) {
-            ticks.last_input = ticks.main;
-            execute_command(i->cmd);
-            i->repeat -= repeat_period;
+        else if (ticks.main >= i->repeat && (!strcmp(i->cmd, SCMD_LEFT) || !strcmp(i->cmd, SCMD_RIGHT))) {
+            i->repeat = ticks.main + REPEAT_INTERVAL;
+            command(i->cmd);
         }
     }
+}
+
+static void show_background(SDL_Surface *surface, bool crossfade)
+{
+    Canvas *c = prepare_background(surface, win_w, win_h);
+    if (c == NULL)
+        return;
+    shelf_set_photo(c, crossfade);
+    cv_free(c);
+    if (crossfade) {
+        photo_fading = true;
+        photo_fade_start = ticks.main;
+    }
+    kick();
 }
 
 // A function to update the slideshow
 static void update_slideshow()
 {
-    // If image duration time has elapsed, load the next image and start the transition
-    if (!state.slideshow_transition && (ticks.main - ticks.slideshow_load > config.slideshow_image_duration) &&
-    !state.slideshow_paused) {
-        
-        // Render the new background image in a separate thread so we don't block the main thread
-        if (!state.slideshow_background_rendering && !state.slideshow_background_ready) {
-            Slideshowhread = SDL_CreateThread(load_next_slideshow_background_async, "Slideshow Thread", (void*) slideshow);
-            state.slideshow_background_rendering = true;
+    if (slideshow == NULL || photo_fading || state.slideshow_paused)
+        return;
+    if (ticks.main - ticks.slideshow_load <= config.slideshow_image_duration)
+        return;
+    if (!state.slideshow_background_rendering && !state.slideshow_background_ready) {
+        slideshow_thread = SDL_CreateThread(load_next_slideshow_background_async, "Slideshow Thread", (void*) slideshow);
+        state.slideshow_background_rendering = true;
+    }
+    else if (state.slideshow_background_ready) {
+        SDL_WaitThread(slideshow_thread, NULL);
+        slideshow_thread = NULL;
+        if (slideshow->transition_surface != NULL) {
+            show_background(slideshow->transition_surface, config.slideshow_transition_time > 0);
+            SDL_FreeSurface(slideshow->transition_surface);
+            if (config.slideshow_transition_time == 0)
+                shelf_set_photo_mix(1.f);
         }
-
-        // Convert background to texture after the rendering thread has completed
-        else if (state.slideshow_background_ready) {
-            SDL_WaitThread(Slideshowhread, NULL);
-            Slideshowhread = NULL;
-            if (config.slideshow_transition_time > 0) {
-                slideshow->transition_texture = load_texture(slideshow->transition_surface);
-                SDL_SetTextureAlphaMod(slideshow->transition_texture, 0);
-                state.slideshow_transition = true;
-            }
-            else {
-                SDL_DestroyTexture(background_texture);
-                background_texture = load_texture(slideshow->transition_surface);
-                ticks.slideshow_load = ticks.main;
-            }
         slideshow->transition_surface = NULL;
         state.slideshow_background_ready = false;
-        }
-    }
-    else if (state.slideshow_transition) {
-        
-        // Increase the transparency
-        slideshow->transition_alpha += slideshow->transition_change_rate;
-        
-        // If transition is done, destroy old background and replace it with the new one
-        if (slideshow->transition_alpha >= 255.0f) {
-            SDL_SetTextureAlphaMod(slideshow->transition_texture, 0xFF);
-            slideshow->transition_alpha = 0.0f;
-            SDL_DestroyTexture(background_texture);
-            background_texture = slideshow->transition_texture;
-            slideshow->transition_texture = NULL;
-            state.slideshow_transition = false;
-            ticks.slideshow_load = ticks.main;
-        }
-        else
-            SDL_SetTextureAlphaMod(slideshow->transition_texture, (Uint8) slideshow->transition_alpha);
+        ticks.slideshow_load = ticks.main;
     }
 }
 
-// A function to update the screensaver
+static bool update_photo_fade()
+{
+    if (!photo_fading)
+        return false;
+    float dur = (float) (config.slideshow_transition_time > 0 ? config.slideshow_transition_time : 1);
+    float p = fminf(1.f, (float) (ticks.main - photo_fade_start) / dur);
+    float e = p < 0.5f ? 4.f * p * p * p : 1.f - powf(-2.f * p + 2.f, 3.f) / 2.f;
+    shelf_set_photo_mix(e);
+    if (p >= 1.f) {
+        photo_fading = false;
+        ticks.slideshow_load = ticks.main;
+    }
+    return true;
+}
+
+// The screensaver: the room lights go down after the idle time
 static void update_screensaver()
 {
-    // Activate the screensaver if the launcher has been idle for the required time
-    if (!state.screensaver_active && ticks.main - ticks.last_input > config.screensaver_idle_time) {
-        state.screensaver_active = true;
-        state.screensaver_transition = true;
-        if (config.background_mode == BACKGROUND_SLIDESHOW && config.screensaver_pause_slideshow)
-            state.slideshow_paused = true;
-    }
-    else {
-
-        // Transition the screen to dark
-        if (state.screensaver_transition) {
-            screensaver->alpha += screensaver->transition_change_rate;
-            if (screensaver->alpha >= screensaver->alpha_end_value) {
-                SDL_SetTextureAlphaMod(screensaver->texture, (Uint8) screensaver->alpha_end_value);
-                state.screensaver_transition = false;
-            }
-            else
-                SDL_SetTextureAlphaMod(screensaver->texture, (Uint8) screensaver->alpha);
-        }
-
-        // User has pressed input, deactivate the screensaver
-        if (state.screensaver_active && ticks.last_input == ticks.main) {
-            SDL_SetTextureAlphaMod(screensaver->texture, 0);
-            screensaver->alpha = 0.0f;
-            state.screensaver_active = false;
-            state.screensaver_transition = false;
-            if (config.background_mode == BACKGROUND_SLIDESHOW) {
-                state.slideshow_paused = false;
-                
-                // Reset the slideshow time so we don't have a transition immediately 
-                // after coming out of screensaver mode
-                ticks.slideshow_load = ticks.main;
-            }
-        }
-    }
+    if (dimmed || state.busy || ticks.main - ticks.last_input <= config.screensaver_idle_time)
+        return;
+    char intensity[PERCENT_MAX_CHARS];
+    copy_string(intensity, config.screensaver_intensity_str[0] != '\0' ? config.screensaver_intensity_str : DEFAULT_SCREENSAVER_INTENSITY, sizeof(intensity));
+    intensity[strlen(intensity) - 1] = '\0';
+    float amount = fminf(fmaxf((float) atof(intensity) / 70.f, 0.f), 1.4f);
+    dimmed = true;
+    state.screensaver_active = true;
+    shelf_dim(amount, true);
+    overlay_dim(true);
+    if (config.background_mode == BACKGROUND_SLIDESHOW && config.screensaver_pause_slideshow)
+        state.slideshow_paused = true;
+    kick();
 }
 
-// A function to update the clock display
-static void update_clock(bool block)
+static void update_clock()
 {
-    if (ticks.main - ticks.clock_update > CLOCK_UPDATE_PERIOD) {
-        if (!state.clock_rendering) {
-
-            // Check to see if the time has changed
-            get_time(clk);
-            if (clk->render_time) {
-                state.clock_rendering = true;
-                if (block)
-                    render_clock(clk);
-                else
-                    clock_thread = SDL_CreateThread(render_clock_async, "Clock Thread", (void*) clk); 
-            }
-            else
-                ticks.clock_update = ticks.main;
-        }
-
-        // Render texture
-        if (state.clock_ready) {
-            SDL_WaitThread(clock_thread, NULL);
-            clock_thread = NULL;
-            SDL_DestroyTexture(clk->time_texture);
-            clk->time_texture = load_texture(clk->time_surface);
-            clk->time_surface = NULL;
-            if (clk->render_date) {
-                SDL_DestroyTexture(clk->date_texture);
-                clk->date_texture = load_texture(clk->date_surface);
-                clk->date_surface = NULL;
-            }
-            ticks.clock_update = ticks.main;
-            clk->render_time = false;
-            clk->render_date = false;
-            state.clock_rendering = false;
-            state.clock_ready = false;
-        }
+    if (!config.clock_enabled)
+        return;
+    if (clock_update(&clock_text)) {
+        overlay_set_time(clock_text.time, clock_text.period, config.clock_show_date ? clock_text.date : "");
+        kick();
     }
 }
 
@@ -1146,8 +1234,6 @@ static inline void pre_launch()
 {
     if (gamepads != NULL)
         disconnect_gamepad(-1, true, false);
-
-// Initialize exit hotkey for Windows
 #ifdef _WIN32
     if (has_exit_hotkey())
         SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
@@ -1159,21 +1245,14 @@ static inline void post_launch()
     // Rebaseline the timing after the program is done
     ticks.main = SDL_GetTicks();
     ticks.last_input = ticks.main;
-
-    // Post-application updates
+    last_frame = ticks.main;
     if (config.gamepad_enabled)
         connect_gamepad(-1, true, false);
-    if (config.clock_enabled)
-        update_clock(true);
-    if (config.background_mode == BACKGROUND_SLIDESHOW)
-        resume_slideshow();
-    if (config.on_launch == ON_LAUNCH_BLANK)
-        set_draw_color();
-
+    ticks.slideshow_load = ticks.main;
+    finish_launch(true);
+    update_clock();
 #ifdef _WIN32
     SDL_EventState(SDL_SYSWMEVENT, SDL_DISABLE);
-    if (config.background_mode == BACKGROUND_TRANSPARENT)
-        hide_cursor(current_entry);
 #endif
 }
 
@@ -1182,14 +1261,16 @@ void quit(int status)
 {
     log_debug("Quitting program");
     if (status != EXIT_SUCCESS)
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, 
-            PROJECT_NAME, 
-            "A critical error occurred. Check the log file for details.", 
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+            PROJECT_NAME,
+            "A critical error occurred. Check the log file for details.",
             NULL
         );
     if (config.quit_cmd != NULL) {
-        execute_command(config.quit_cmd);
-        free(config.quit_cmd);
+        char *quit_cmd = config.quit_cmd;
+        config.quit_cmd = NULL;
+        start_process(quit_cmd, false);
+        free(quit_cmd);
     }
     cleanup();
     exit(status);
@@ -1208,9 +1289,225 @@ void print_version(FILE *stream)
     fprintf(stream, "  SDL_ttf   %u.%u.%u" endline, ttf_version->major, ttf_version->minor, ttf_version->patch);
 }
 
-int main(int argc, char *argv[]) 
+// Drop the scene resolution when frames run slow; throttled or hidden frames say nothing about the GPU
+static void auto_quality(float raw)
 {
-    int error;
+    if (config.quality != QUALITY_AUTO || raw <= 0.f || raw >= 0.1f)
+        return;
+    frame_times[frame_count++ % QUALITY_FRAMES] = raw;
+    if (frame_count < QUALITY_FRAMES)
+        return;
+    float avg = 0.f;
+    for (int i = 0; i < QUALITY_FRAMES; i++)
+        avg += frame_times[i];
+    avg /= QUALITY_FRAMES;
+    if (avg > 1.f / 45.f && quality_scale > base_scale * 0.55f && ticks.main - last_drop > 1500) {
+        quality_scale = fmaxf(base_scale * 0.55f, quality_scale - base_scale * 0.15f);
+        last_drop = ticks.main;
+        frame_count = 0;
+        RenderQuality q = { 4, quality_scale };
+        render_resize(win_w, win_h, q);
+        log_debug("Frames averaged %.1f ms, scene scale now %.2f", avg * 1000.f, quality_scale);
+    }
+}
+
+static void draw_frame()
+{
+    if (overlay_scene_alpha() > 0.f)
+        shelf_render();
+    render_overlay_begin();
+    render_overlay_scene(overlay_scene_alpha());
+    overlay_draw();
+    render_overlay_end();
+    SDL_GL_SwapWindow(window);
+}
+
+// Render while anything moves, otherwise sleep until the next event
+static void frame()
+{
+    float raw = (float) (ticks.main - last_frame) / 1000.f;
+    float dt = fminf(raw, SPRING_MAX_DT);
+    last_frame = ticks.main;
+    bool moving = shelf_update(dt);
+    float z = fminf(fmaxf(shelf_zoom() * 1.6f, 0.f), 1.f);
+    overlay_set_hud(1.f - z * z * (3.f - 2.f * z));
+    moving |= overlay_update(dt);
+    moving |= update_photo_fade();
+    draw_frame();
+    auto_quality(raw);
+    if (!config.vsync) {
+        Uint32 elapsed = SDL_GetTicks() - ticks.main;
+        if (elapsed < refresh_period)
+            SDL_Delay(refresh_period - elapsed);
+    }
+    animating = moving;
+    if (!moving)
+        frame_count = 0;
+}
+
+static void save_capture(const char *path)
+{
+    int w, h;
+    unsigned char *px = NULL;
+    draw_frame();
+    render_read_pixels(&w, &h, &px);
+    SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(px, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
+    if (s != NULL) {
+        // the default framebuffer has no meaningful alpha
+        SDL_SetSurfaceBlendMode(s, SDL_BLENDMODE_NONE);
+        for (int i = 0; i < w * h; i++)
+            px[i * 4 + 3] = 255;
+        IMG_SavePNG(s, path);
+        SDL_FreeSurface(s);
+        printf("Saved %s (%ix%i)\n", path, w, h);
+    }
+    free(px);
+}
+
+// Test hook: play the --keys sequence, then save --capture and quit
+static void run_test_script()
+{
+    static Uint32 next = 0;
+    static char *cursor = NULL;
+    static bool started = false, done = false;
+    if (config.capture_path == NULL || done)
+        return;
+    if (!started) {
+        started = true;
+        cursor = config.test_keys;
+        next = ticks.main + 1200;
+    }
+    if (ticks.main < next)
+        return;
+    if (cursor != NULL && *cursor != '\0') {
+        char key[32];
+        size_t len = strcspn(cursor, ",");
+        copy_string(key, cursor, len + 1 < sizeof(key) ? len + 1 : sizeof(key));
+        cursor += len + (cursor[len] == ',' ? 1 : 0);
+        if (!strcmp(key, "left")) command(SCMD_LEFT);
+        else if (!strcmp(key, "right")) command(SCMD_RIGHT);
+        else if (!strcmp(key, "select")) command(SCMD_SELECT);
+        else if (!strcmp(key, "back")) command(SCMD_BACK);
+        else if (!strcmp(key, "home")) command(SCMD_HOME);
+        else if (!strcmp(key, "dim")) ticks.last_input = 0, config.screensaver_idle_time = 0, config.screensaver_enabled = true;
+        else command(NULL);
+        // --wait counts from the last key
+        next = ticks.main + (*cursor != '\0' ? 700 : 0);
+        return;
+    }
+    done = true;
+    Uint32 until = ticks.main + (Uint32) config.capture_wait;
+    while (SDL_GetTicks() < until) {
+        ticks.main = SDL_GetTicks();
+        update_launch();
+        if (config.screensaver_enabled)
+            update_screensaver();
+        frame();
+    }
+    save_capture(config.capture_path);
+    quit(EXIT_SUCCESS);
+}
+
+static void resize_window()
+{
+    SDL_GL_GetDrawableSize(window, &win_w, &win_h);
+    base_scale = quality_scale = shelf_quality_scale();
+    shelf_resize(win_w, win_h);
+    RenderQuality q = { config.quality == QUALITY_LOW ? 0 : 4, quality_scale };
+    render_resize(win_w, win_h, q);
+    overlay_resize(win_w, win_h, shelf_per_page());
+    if (config.clock_enabled)
+        overlay_set_time(clock_text.time, clock_text.period, config.clock_show_date ? clock_text.date : "");
+    update_hud();
+}
+
+static void handle_event(SDL_Event *ev)
+{
+    switch (ev->type) {
+        case SDL_QUIT:
+            quit(EXIT_SUCCESS);
+            break;
+
+        case SDL_KEYDOWN:
+            handle_keypress(&ev->key.keysym);
+            break;
+
+        case SDL_MOUSEBUTTONDOWN:
+            if (config.mouse_select && ev->button.button == SDL_BUTTON_LEFT)
+                command(SCMD_SELECT);
+            else
+                command(NULL);
+            break;
+
+        case SDL_MOUSEWHEEL: {
+            static Uint32 wheel_lock = 0;
+            if (ticks.main >= wheel_lock && (ev->wheel.y != 0 || ev->wheel.x != 0)) {
+                wheel_lock = ticks.main + 140;
+                command((ev->wheel.y < 0 || ev->wheel.x > 0) ? SCMD_RIGHT : SCMD_LEFT);
+            }
+            break;
+        }
+
+        case SDL_MOUSEMOTION:
+            wake();
+            break;
+
+        case SDL_JOYDEVICEADDED:
+            if (SDL_IsGameController(ev->jdevice.which) == SDL_TRUE) {
+                log_debug("Gamepad connected with device index %i", ev->jdevice.which);
+                if (config.gamepad_device < 0 || config.gamepad_device == ev->jdevice.which)
+                    connect_gamepad(ev->jdevice.which, !state.application_running, true);
+            }
+            break;
+
+        case SDL_JOYDEVICEREMOVED:
+            log_debug("Gamepad disconnected");
+            if (config.gamepad_device < 0 || config.gamepad_device == ev->jdevice.which)
+                disconnect_gamepad(ev->jdevice.which, true, true);
+            break;
+
+        case SDL_WINDOWEVENT:
+            if (ev->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                log_debug("Lost keyboard focus");
+                state.has_focus = false;
+                if (state.application_launching) {
+                    log_debug("Application detected");
+                    state.application_launching = false;
+                    state.application_running = true;
+                    // with the launcher still on screen the book goes back; otherwise it stays open behind the app
+                    if (config.on_launch == ON_LAUNCH_NONE)
+                        shelf_launch_pull(false);
+                    if (config.on_launch == ON_LAUNCH_NONE && launch.entry != NULL) {
+                        char text[512];
+                        snprintf(text, sizeof(text), "%s is running", launch.entry->title);
+                        overlay_status(text);
+                    }
+                    pre_launch();
+                }
+#ifdef _WIN32
+                else if (ticks.main - ticks.program_start < 10000)
+                    set_foreground_window();
+#endif
+            }
+            else if (ev->window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                log_debug("Gained keyboard focus");
+                state.has_focus = true;
+            }
+            else if (ev->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+                resize_window();
+            else if (ev->window.event == SDL_WINDOWEVENT_EXPOSED)
+                kick();
+            break;
+#ifdef _WIN32
+        case SDL_SYSWMEVENT:
+            check_exit_hotkey(ev->syswm.msg);
+            break;
+#endif
+    }
+}
+
+int main(int argc, char *argv[])
+{
     char *config_file_path = NULL;
     config.exe_path = SDL_GetBasePath();
 
@@ -1233,193 +1530,108 @@ int main(int argc, char *argv[])
     init_sdl_image();
     init_sdl_ttf();
     validate_settings(&geo);
-    
-    // Initialize slideshow
+    find_assets();
     if (config.background_mode == BACKGROUND_SLIDESHOW)
         init_slideshow();
-
-    // Initialize Nanosvg, create window and renderer
-    init_svg();
     create_window();
 
     // Initialize timing
     ticks.main = SDL_GetTicks();
     ticks.last_input = ticks.main;
     ticks.program_start = ticks.main;
+    last_frame = ticks.main;
 
     // Load gamepad overrides
     if (config.gamepad_enabled && config.gamepad_mappings_file != NULL) {
-        error = SDL_GameControllerAddMappingsFromFile(config.gamepad_mappings_file);
-        if (error < 0) {
-            log_error("Could not load gamepad mappings from %s\n%s", 
+        if (SDL_GameControllerAddMappingsFromFile(config.gamepad_mappings_file) < 0) {
+            log_error("Could not load gamepad mappings from %s\n%s",
                 config.gamepad_mappings_file,
                 SDL_GetError()
             );
         }
     }
 
-    // Render background
-    if (config.background_mode == BACKGROUND_IMAGE) {
-        if (config.background_image == NULL)
-            log_error("Background 'Image' setting not specified in config file");
-        else
-            background_texture = load_texture_from_file(config.background_image);
+    // The loading screen is the home screen without its books: room, lamp, menu name, clock and hints
+    if (!overlay_init(assets_dir))
+        log_fatal("Could not load the interface fonts");
+    setup_shelf();
+    overlay_resize(win_w, win_h, shelf_per_page());
+    overlay_set_clock(config.clock_enabled, config.clock_show_date);
+    overlay_set_scrim(config.background_mode != BACKGROUND_TRANSPARENT);
+    const char *trail[1] = { default_menu->name };
+    overlay_set_trail(trail, 1);
+    overlay_set_rail(0, 0, shelf_per_page());
+    if (config.clock_enabled) {
+        clock_init();
+        update_clock();
+    }
 
-        // Switch to color mode if loading background image failed
-        if (background_texture == NULL) {
-            config.background_mode = BACKGROUND_COLOR;
-            log_error("Couldn't load background image, defaulting to color background");
-            set_draw_color();
+    // Background photo for Image and Slideshow modes
+    if (config.background_mode == BACKGROUND_IMAGE) {
+        SDL_Surface *surface = config.background_image ? IMG_Load(config.background_image) : NULL;
+        if (surface == NULL)
+            log_error("Couldn't load background image %s", config.background_image ? config.background_image : "(not set)");
+        else {
+            show_background(surface, false);
+            SDL_FreeSurface(surface);
         }
     }
-
-    // Render first slideshow image
-    else if (config.background_mode == BACKGROUND_SLIDESHOW) {
+    else if (config.background_mode == BACKGROUND_SLIDESHOW && slideshow != NULL) {
         SDL_Surface *surface = load_next_slideshow_background(slideshow, false);
-        background_texture = load_texture(surface);
+        if (surface != NULL) {
+            show_background(surface, false);
+            SDL_FreeSurface(surface);
+        }
+        ticks.slideshow_load = ticks.main;
     }
+    overlay_loading(true);
+    ticks.main = last_frame = SDL_GetTicks();
+    loading_frame();
+    build_shelf();
 
-    // Initialize screensaver
-    if (config.screensaver_enabled)
-        init_screensaver();
-
-    // Initialize clock
-    if (config.clock_enabled) {
-        clk = malloc(sizeof(Clock));
-        init_clock(clk);
-        ticks.clock_update = ticks.main;
-    }
-    
-    // Render highlight
-    if (config.highlight) {
-        int button_height = config.icon_size + config.title_padding + geo.font_height;
-        highlight = malloc(sizeof(Highlight));
-        highlight->texture = render_highlight(config.icon_size + 2*config.highlight_hpadding,
-                                button_height + 2*config.highlight_vpadding,
-                                &highlight->rect
-                            );
-    }
-
-    // Render scroll indicators
-    if (config.scroll_indicators) {
-        scroll = malloc(sizeof(Scroll));
-        scroll->texture = NULL;
-        int scroll_indicator_height = (int) ((float) geo.screen_height * SCROLL_INDICATOR_HEIGHT);
-        render_scroll_indicators(scroll, scroll_indicator_height, &geo);
-    }
-
-    // Render background overlay
-    if (config.background_overlay) {
-        SDL_Surface *overlay_surface = NULL;
-        overlay_surface = SDL_CreateRGBSurfaceWithFormat(0, 
-                              geo.screen_width, 
-                              geo.screen_height, 
-                              32,
-                              SDL_PIXELFORMAT_ARGB8888
-                          );
-        Uint32 overlay_color = SDL_MapRGBA(overlay_surface->format, 
-                                   config.background_overlay_color.r, 
-                                   config.background_overlay_color.g, 
-                                   config.background_overlay_color.b, 
-                                   config.background_overlay_color.a
-                               );
-        SDL_FillRect(overlay_surface, NULL, overlay_color);
-        background_overlay = load_texture(overlay_surface);
-    }
-
-    // Register exit hotkey with Windows
 #ifdef _WIN32
     if (has_exit_hotkey())
         register_exit_hotkey();
 #endif
 
-    // Print debug info to log
     if (config.debug) {
-        debug_video(renderer, &display_mode);
+        debug_video(render_info(), &display_mode);
         debug_settings();
         debug_gamepad(gamepad_controls);
-        debug_hotkeys(hotkeys);    
+        debug_hotkeys(hotkeys);
         debug_menu_entries(config.first_menu, config.num_menus);
     }
 
-    // Load the default menu and display it
-    error = load_menu(default_menu, false, true);
-    if (error)
+    // Show the default menu, its lamp warming up as the shelf fades in
+    current_menu = default_menu;
+    if (current_menu->shelf_index < 0)
         log_fatal("Could not load default menu %s", config.default_menu);
+    // the books slide onto the shelf the way a new menu arrives
+    shelf_enter(current_menu->shelf_index, 0);
+    update_hud();
+    overlay_loading(false);
+    ticks.main = SDL_GetTicks();
 
-    // Execute startup command
     if (config.startup_cmd != NULL)
         execute_command(config.startup_cmd);
-    
-    // Main program loop
+
     log_debug("Begin program loop");
     while (1) {
         ticks.main = SDL_GetTicks();
-        while (SDL_PollEvent(&event)) {
-            switch(event.type) {
-                case SDL_QUIT:
-                    quit(EXIT_SUCCESS);
-                    break;
-
-                case SDL_KEYDOWN:
-                    ticks.last_input = ticks.main;
-                    handle_keypress(&event.key.keysym);
-                    break;
-                
-                case SDL_MOUSEBUTTONDOWN:
-                    if (config.mouse_select && event.button.button == SDL_BUTTON_LEFT) {
-                        ticks.last_input = ticks.main;
-                        execute_command(current_entry->cmd);
-                    }
-                    break;
-
-                case SDL_JOYDEVICEADDED:
-                    if (SDL_IsGameController(event.jdevice.which) == SDL_TRUE) {
-                        log_debug("Gamepad connected with device index %i", event.jdevice.which);
-                        if (config.gamepad_device < 0 || config.gamepad_device == event.jdevice.which)
-                            connect_gamepad(event.jdevice.which, !state.application_running, true);
-                    }
-                    break;
-
-                case SDL_JOYDEVICEREMOVED:
-                    if (SDL_IsGameController(event.jdevice.which) == SDL_TRUE || 1) {
-                        log_debug("Gamepad disconnected");
-                        if (config.gamepad_device < 0 || config.gamepad_device == event.jdevice.which)
-                            disconnect_gamepad(event.jdevice.which, true, true);
-                    }
-                    break;
-
-                case SDL_WINDOWEVENT:
-                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                        log_debug("Lost keyboard focus");
-                        state.has_focus = false;
-                        if (state.application_launching) {
-                            log_debug("Application detected");
-                            state.application_launching = false;
-                            state.application_running = true;
-                            pre_launch();
-                        }
-#ifdef _WIN32
-                        // Sometimes the launcher will lose focus on Windows when autostarting
-                        // So if we lose the window focus within 10 seconds of the launcher starting
-                        // we will grab back th Window focus. This is a bit of a hack
-                        else if (ticks.main - ticks.program_start < 10000)
-                            set_foreground_window();
-#endif
-                    }
-                    else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
-                        log_debug("Gained keyboard focus");
-                        state.has_focus = true;
-                    }
-                    else if (event.window.event == SDL_WINDOWEVENT_LEAVE)
-                        log_debug("Lost mouse focus");
-                    break;
-#ifdef _WIN32
-                case SDL_SYSWMEVENT:
-                    check_exit_hotkey(event.syswm.msg);
-                    break;
-#endif
-            }
+        bool got_event;
+        if (animating || state.application_launching)
+            got_event = SDL_PollEvent(&event);
+        else {
+            // idle: wait for input, waking for the gamepad, the clock and the screensaver
+            int timeout = state.application_running ? APPLICATION_WAIT_PERIOD : (gamepads != NULL ? 16 : 250);
+            got_event = SDL_WaitEventTimeout(&event, timeout);
+            ticks.main = SDL_GetTicks();
+            if (!animating)
+                last_frame = ticks.main - (Uint32) (1000 / 60);
+        }
+        while (got_event) {
+            handle_event(&event);
+            got_event = SDL_PollEvent(&event);
         }
 
         // Update application state
@@ -1428,28 +1640,20 @@ int main(int argc, char *argv[])
             post_launch();
             log_debug("Application finished");
         }
-
-        // Post-event loop updates
-        if (!(state.application_running || state.application_launching)) {
-            if (gamepads != NULL)
-                poll_gamepad();
-            if (config.background_mode == BACKGROUND_SLIDESHOW)
-                update_slideshow();
-            if (config.screensaver_enabled)
-                update_screensaver();
-            if (config.clock_enabled)
-                update_clock(false);
-        }
-        if (state.application_launching &&
-        ticks.main - ticks.application_launched > config.application_timeout) {
-            state.application_launching = false;
-            if (config.on_launch == ON_LAUNCH_BLANK)
-                set_draw_color();
-        }
         if (state.application_running)
-            SDL_Delay(APPLICATION_WAIT_PERIOD);
-        else
-            draw_screen();
+            continue;
+
+        if (gamepads != NULL)
+            poll_gamepad();
+        if (config.background_mode == BACKGROUND_SLIDESHOW)
+            update_slideshow();
+        if (config.screensaver_enabled)
+            update_screensaver();
+        update_clock();
+        update_launch();
+        run_test_script();
+        if (animating)
+            frame();
     }
     quit(EXIT_SUCCESS);
 }

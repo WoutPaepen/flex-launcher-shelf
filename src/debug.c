@@ -248,17 +248,12 @@ void debug_slideshow(Slideshow *slideshow)
 }
 
 // A function to debug the video settings
-void debug_video(SDL_Renderer *renderer, SDL_DisplayMode *display_mode)
+void debug_video(const char *gl_info, SDL_DisplayMode *display_mode)
 {
     log_debug("================== Video Information ===================\n");
     log_debug("Resolution:    %ix%i", display_mode->w, display_mode->h);
     log_debug("Refresh rate:  %i Hz", display_mode->refresh_rate);
     log_debug("Video driver:  %s", SDL_GetCurrentVideoDriver());
-    log_debug("");
-    SDL_RendererInfo info;
-    SDL_GetRendererInfo(renderer, &info);
-    log_debug("Supported Texture formats:");
-    for(size_t i = 0; i < info.num_texture_formats; i++)
-        log_debug("  %s", SDL_GetPixelFormatName(info.texture_formats[i]));
+    log_debug("OpenGL:        %s", gl_info);
     log_debug("");
 }
