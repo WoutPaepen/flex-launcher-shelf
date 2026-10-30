@@ -23,11 +23,20 @@ All from [Poly Haven](https://polyhaven.com), released under CC0 1.0 (public dom
 
 ## Icons
 
-`youtube.svg`, `netflix.svg`, `hbomax.svg`, `vrtmax.svg`, `browser.svg`, `exit.svg`,
-`jellyfin.svg` and `jellyfin_selected.svg` are generic pictograms drawn for this project and
-released with it under the Unlicense. They are not the services' official logos; drop in your
-own icon files and point the entries in `config.ini` at them.
-The PNG icons come from upstream Flex Launcher.
+The service icons carry each brand's own logo, placed on a round sticker in the brand's colours.
+The logos are trademarks of their owners and are used here only to identify the app each book opens.
+
+| File | Logo source |
+| --- | --- |
+| `icons/netflix.svg` | Netflix "N", [Simple Icons](https://simpleicons.org) (CC0) |
+| `icons/spotify.svg` | Spotify mark, Simple Icons (CC0) |
+| `icons/youtube.svg` | YouTube mark, Simple Icons (CC0) |
+| `icons/hbomax.svg` | HBO Max 2025 wordmark, Wikimedia Commons `File:HBO_Max_2025.svg` (public domain) |
+| `icons/vrtmax.svg` | VRT logo (2021), Wikimedia Commons `File:VRT_logo_2021.svg` (public domain) |
+
+`browser.svg`, `exit.svg`, `jellyfin.svg` and `jellyfin_selected.svg` are pictograms drawn for this
+project and released with it under the Unlicense. The PNG icons come from upstream Flex Launcher.
+Any entry can point at your own icon file instead.
 
 ## Code
 
